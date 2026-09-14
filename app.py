@@ -1,20 +1,19 @@
 import os
-import re
 import sys
+import re
 import json
 import time
 import random
 import string
-import logging
 import requests
 from flask import Flask, Response, stream_with_context
 from playwright.sync_api import sync_playwright
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 app = Flask(__name__)
 app.json.ensure_ascii = False
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
 
 BASE = "https://viw.ai"
 SPAMOK_API = "https://api.spamok.com/v2"
@@ -143,7 +142,7 @@ def home():
     <body>
         <div class="card">
             <h1><span>⚡</span> Viw.AI Otomatik Hesap Açıcı</h1>
-            <p>Butona bastığınızda Playwright Chrome profili ve SpamOk arka planda çalışarak yeni bir hesap açacak ve canlı logları terminale dökecektir.</p>
+            <p>Butona bastığınızda Playwright Chrome profili ile kayıt işlemi yürütülecek ve canlı loglar aşağıya akacaktır.</p>
 
             <button id="btnStart" onclick="startSignup()">🚀 Hesap Aç</button>
 
@@ -205,55 +204,51 @@ def stream_signup():
                     "--no-default-browser-check",
                 ]
 
-                # Lokalde (Windows) headless=False ve channel='chrome' çalıştır
-                # Linux/Render'da headless=True olarak çalıştır
-                is_linux = os.name != "nt"
-                is_headless = True if is_linux else False
-
                 try:
                     context = p.chromium.launch_persistent_context(
                         user_data_dir=PROFILE_DIR,
-                        channel="chrome" if not is_linux else None,
-                        headless=is_headless,
+                        channel="chrome" if os.name == "nt" else None,
+                        headless=False,
                         args=launch_args,
-                        viewport=None if not is_headless else {"width": 1920, "height": 1080},
+                        viewport=None,
                     )
-                    yield f"data: [*] Chrome kalıcı profiliyle başlatıldı (Headless: {is_headless}).\n\n"
+                    yield f"data: [*] Chrome kalıcı profiliyle başlatıldı (Headless: False).\n\n"
                 except Exception:
                     context = p.chromium.launch_persistent_context(
                         user_data_dir=PROFILE_DIR,
-                        headless=is_headless,
+                        headless=False,
                         args=launch_args,
-                        viewport=None if not is_headless else {"width": 1920, "height": 1080},
+                        viewport=None,
                     )
-                    yield f"data: [*] Chromium kalıcı profiliyle başlatıldı (Headless: {is_headless}).\n\n"
+                    yield f"data: [*] Chromium kalıcı profiliyle başlatıldı (Headless: False).\n\n"
 
                 page = context.pages[0] if context.pages else context.new_page()
 
+                # [1] Sayfayı Aç
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
                 page.goto("https://viw.ai/", wait_until="networkidle", timeout=60000)
 
-                # 2. Giriş Modalı
+                # [2] Giriş Modalı
                 yield f"data: [2] Giriş butonu aranıyor...\n\n"
                 login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
                 if login_btn.count() > 0 and login_btn.is_visible():
                     login_btn.click()
                     page.wait_for_timeout(1500)
 
-                # 3. Continue with Email
+                # [3] Continue with Email
                 yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
                 email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
                 if email_btn.count() > 0:
                     email_btn.click()
                     page.wait_for_timeout(1500)
 
-                # 4. E-posta Girişi
+                # [4] E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
 
-                # 5. Turnstile Token ve Etkileşim Kontrolü
+                # [5] Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
                 for i in range(20):
                     token = page.evaluate("""() => {
@@ -275,14 +270,14 @@ def stream_signup():
 
                     page.wait_for_timeout(1000)
 
-                # 6. Form Gönderimi (Submit)
+                # [6] Form Gönderimi (Submit)
                 yield f"data: [6] Form gönderiliyor...\n\n"
                 submit_btn = page.locator("button[type='submit']")
                 if submit_btn.count() > 0:
                     submit_btn.click()
                     page.wait_for_timeout(4000)
 
-                # 7. SpamOk Mail Bekleme
+                # [7] SpamOk Mail Bekleme
                 yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
                 magic_link = None
                 for msg in wait_for_magic_link_stream(local_prefix, timeout=90):
@@ -293,12 +288,12 @@ def stream_signup():
                 if not magic_link:
                     magic_link = wait_for_magic_link_direct(local_prefix)
 
-                # 8. Linke tarayıcı üzerinden git ve oturumu tamamla
+                # [8] Linke tarayıcı üzerinden git ve oturumu tamamla
                 yield f"data: [8] Doğrulama linki açılıyor: {magic_link}\n\n"
                 page.goto(magic_link, wait_until="networkidle", timeout=45000)
                 page.wait_for_timeout(3000)
 
-                # 9. Oturum Bilgisini Al
+                # [9] Oturum Bilgisini Al
                 session_data = page.evaluate("""async () => {
                     try {
                         const r = await fetch('/api/auth/get-session');
@@ -309,6 +304,13 @@ def stream_signup():
 
                 user_id = session_data.get("user", {}).get("id") if session_data else "Bilinmiyor"
                 cookies = context.cookies()
+
+                # Çerezleri diske de kaydet
+                try:
+                    with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(cookies, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
 
                 yield f"data: \n\n"
                 yield f"data: ============================================================\n\n"
