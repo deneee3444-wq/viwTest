@@ -42,10 +42,9 @@ def generate_random_prefix(length: int = 12) -> str:
 
 def capture_screen():
     """İşletim sistemi / X11 ekran görüntüsü alır (Thread-safe, Playwright'ı kilitlemez)."""
-    # 1. Playwright thread'ine de istek sinyali gönder
     ss_request_event.set()
 
-    # 2. Linux / Xvfb ortamında scrot ile anında yakala
+    # 1. Linux / Xvfb ortamında scrot ile doğrudan yakala
     if os.name != "nt":
         try:
             disp = os.environ.get("DISPLAY", ":99")
@@ -60,7 +59,7 @@ def capture_screen():
         except Exception:
             pass
 
-    # 3. Windows veya Pillow fallback
+    # 2. Windows Pillow fallback
     try:
         from PIL import ImageGrab
         im = ImageGrab.grab()
@@ -69,13 +68,12 @@ def capture_screen():
     except Exception:
         pass
 
-    # Playwright thread'inin kaydetmesi için kısa bekleme
-    time.sleep(0.4)
+    time.sleep(0.3)
     return os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0
 
 
 def check_and_handle_ss_request(page):
-    """Playwright döngüleri içindeyken kullanıcı SS istemişse yakalar."""
+    """Playwright sayfası etkinken kullanıcı SS istemişse yakalar."""
     if ss_request_event.is_set():
         ss_request_event.clear()
         try:
@@ -340,6 +338,7 @@ def home():
                 badge.style.color = "#f59e0b";
                 term.textContent = "[*] İşlem başlatıldı...\n";
 
+                let isFinished = false;
                 const es = new EventSource('/stream-signup');
 
                 es.onmessage = function(e) {
@@ -347,6 +346,7 @@ def home():
                     term.scrollTop = term.scrollHeight;
 
                     if (e.data.indexOf("[BITTI]") !== -1 || e.data.indexOf("[HATA]") !== -1) {
+                        isFinished = true;
                         es.close();
                         btn.disabled = false;
                         btn.innerText = "🚀 Tekrar Hesap Aç";
@@ -356,12 +356,14 @@ def home():
                 };
 
                 es.onerror = function() {
-                    term.textContent += "\n[!] Akış tamamlandı veya bağlantı kapandı.\n";
+                    if (!isFinished) {
+                        term.textContent += "\n[!] Akış tamamlandı veya bağlantı kapandı.\n";
+                        btn.disabled = false;
+                        btn.innerText = "🚀 Hesap Aç";
+                        badge.innerText = "Bağlantı Kapandı";
+                        badge.style.color = "#94a3b8";
+                    }
                     es.close();
-                    btn.disabled = false;
-                    btn.innerText = "🚀 Hesap Aç";
-                    badge.innerText = "Bağlantı Kapandı";
-                    badge.style.color = "#94a3b8";
                 };
             }
         </script>
@@ -392,8 +394,6 @@ def stream_signup():
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
                     "--window-size=1920,1080",
                     "--start-maximized",
                     "--no-first-run",
@@ -434,6 +434,7 @@ def stream_signup():
                 if "Just a moment" in page_title or "Cloudflare" in page_title or page.locator("iframe[src*='challenges.cloudflare.com']").count() > 0:
                     yield f"data: [!] Cloudflare koruma sayfası tespit edildi! Çözülüyor...\n\n"
                     for _ in range(20):
+                        yield ": ping\n\n"
                         check_and_handle_ss_request(page)
                         try:
                             ts_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
@@ -448,46 +449,39 @@ def stream_signup():
 
                 # 2. Giriş Modalı
                 yield f"data: [2] Giriş butonu açılıyor...\n\n"
+                yield ": ping\n\n"
                 page.wait_for_timeout(1000)
                 check_and_handle_ss_request(page)
 
-                # Javascript ile tıklamayı tetikle (CSS display:none veya responsive boyuttan etkilenmez)
-                opened = page.evaluate("""() => {
-                    const el = document.querySelector('a[href*="/login"], a[href="/login"]') || 
-                               Array.from(document.querySelectorAll('a, button')).find(e => e.innerText && e.innerText.trim().toLowerCase() === 'login');
-                    if (el) {
-                        el.click();
-                        return true;
-                    }
-                    return false;
-                }""")
-
-                if not opened:
-                    login_btn = page.locator("a:has-text('Login'), button:has-text('Login'), a[href*='/login']").first
-                    if login_btn.count() > 0:
-                        login_btn.click(force=True)
+                # Modal açma: Önce locator, sonra JS click
+                login_btn = page.locator("a:has-text('Login'), button:has-text('Login'), a[href*='/login']").first
+                if login_btn.count() > 0 and login_btn.is_visible():
+                    login_btn.click(force=True)
+                else:
+                    page.evaluate("""() => {
+                        const el = document.querySelector('a[href*="/login"], a[href="/login"]');
+                        if (el) el.click();
+                    }""")
 
                 page.wait_for_timeout(2000)
                 check_and_handle_ss_request(page)
+                yield ": ping\n\n"
 
                 # 3. Continue with Email
                 yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
-                email_btn_clicked = page.evaluate("""() => {
-                    const btn = Array.from(document.querySelectorAll('button, span, div')).find(e => e.innerText && e.innerText.includes('Continue with Email'));
-                    if (btn) {
-                        btn.click();
-                        return true;
-                    }
-                    return false;
-                }""")
-
-                if not email_btn_clicked:
-                    email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
-                    if email_btn.count() > 0:
-                        email_btn.click(force=True)
+                email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email'), text='Continue with Email'").first
+                if email_btn.count() > 0:
+                    email_btn.click(force=True)
+                else:
+                    page.evaluate("""() => {
+                        const btns = Array.from(document.querySelectorAll('button, span'));
+                        const b = btns.find(x => x.textContent && x.textContent.includes('Continue with Email'));
+                        if (b) b.click();
+                    }""")
 
                 page.wait_for_timeout(2000)
                 check_and_handle_ss_request(page)
+                yield ": ping\n\n"
 
                 # 4. E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
@@ -496,10 +490,12 @@ def stream_signup():
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
                 check_and_handle_ss_request(page)
+                yield ": ping\n\n"
 
                 # 5. Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
                 for i in range(25):
+                    yield ": ping\n\n"
                     check_and_handle_ss_request(page)
                     token = page.evaluate("""() => {
                         const el = document.querySelector('input[name="cf-turnstile-response"]');
@@ -527,6 +523,7 @@ def stream_signup():
                 if submit_btn.count() > 0:
                     submit_btn.click(force=True)
                     page.wait_for_timeout(4000)
+                yield ": ping\n\n"
 
                 # 7. SpamOk Mail Bekleme
                 yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
@@ -537,6 +534,7 @@ def stream_signup():
                 magic_link = None
 
                 while time.time() < deadline:
+                    yield ": ping\n\n"
                     check_and_handle_ss_request(page)
                     try:
                         r = requests.get(f"{SPAMOK_API}/EmailBox/{local_prefix}", timeout=15)
@@ -576,6 +574,7 @@ def stream_signup():
                 page.goto(magic_link, wait_until="domcontentloaded", timeout=45000)
                 page.wait_for_timeout(3000)
                 check_and_handle_ss_request(page)
+                yield ": ping\n\n"
 
                 # 9. Oturum Bilgisini Al
                 session_data = page.evaluate("""async () => {
@@ -614,8 +613,10 @@ def stream_signup():
 
                 context.close()
 
-        except Exception as err:
-            yield f"data: [HATA] Bir hata oluştu: {str(err)}\n\n"
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as err:
+            yield f"data: [HATA] Bir hata oluştu: {type(err).__name__}: {str(err)}\n\n"
             if page:
                 try:
                     data = page.screenshot(timeout=3000, full_page=False)
