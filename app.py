@@ -21,18 +21,29 @@ PROFILE_DIR = os.path.abspath("./chrome_profile") if os.name == "nt" else "/tmp/
 COOKIE_FILE = os.path.abspath("./session_cookies.json")
 SCREENSHOT_FILE = os.path.abspath("./latest_screenshot.png") if os.name == "nt" else "/tmp/latest_screenshot.png"
 
+PLACEHOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+  <rect width="100%" height="100%" fill="#020617"/>
+  <rect x="20" y="20" width="760" height="410" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
+  <circle cx="400" cy="190" r="36" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+  <path d="M388 190 L412 190 M400 178 L400 202" stroke="#38bdf8" stroke-width="3" stroke-linecap="round"/>
+  <text x="400" y="260" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="500" text-anchor="middle">Ekran görüntüsü bekleniyor...</text>
+  <text x="400" y="285" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" text-anchor="middle">İşlem başladığında anlık olarak güncellenecektir</text>
+</svg>"""
+
 
 def generate_random_prefix(length: int = 12) -> str:
     """Rastgele e-posta kullanıcı adı üretir."""
     return "".join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 
-def save_screenshot(page):
+def save_screenshot(page, desc: str = ""):
     """Anlık tarayıcı ekran görüntüsünü dosyaya kaydeder."""
     try:
         page.screenshot(path=SCREENSHOT_FILE, full_page=False)
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        print(f"[SS HATA] {desc}: {e}")
+        return False
 
 
 @app.get("/favicon.ico")
@@ -42,9 +53,14 @@ def favicon():
 
 @app.get("/screenshot")
 def get_screenshot():
-    if os.path.exists(SCREENSHOT_FILE):
-        return send_file(SCREENSHOT_FILE, mimetype="image/png", max_age=0)
-    return ("Ekran görüntüsü bulunamadı", 404)
+    if os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0:
+        response = send_file(SCREENSHOT_FILE, mimetype="image/png")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+
+    response = Response(PLACEHOLDER_SVG, mimetype="image/svg+xml")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
 
 
 @app.get("/")
@@ -167,14 +183,6 @@ def home():
                 object-fit: contain;
                 border-radius: 6px;
                 border: 1px solid #1f2937;
-                display: none;
-            }
-            #ssPlaceholder {
-                color: #64748b;
-                font-size: 13px;
-                font-family: monospace;
-                text-align: center;
-                padding: 20px;
             }
             .badge {
                 font-size: 11px;
@@ -209,11 +217,10 @@ def home():
                 <div class="panel">
                     <div class="panel-header">
                         <span>📸 Canlı Tarayıcı Ekranı</span>
-                        <span id="ssTime" class="badge">Bekleniyor</span>
+                        <span id="ssTime" class="badge">Başlangıç</span>
                     </div>
                     <div class="ss-container">
-                        <img id="ssImage" alt="Canlı Ekran Görüntüsü" onload="onImageLoad()" onerror="onImageError()">
-                        <div id="ssPlaceholder">📸 Henüz ekran görüntüsü alınmadı.<br><small style="color:#475569;">İşlem başladığında otomatik güncellenir.</small></div>
+                        <img id="ssImage" src="/screenshot" alt="Canlı Ekran Görüntüsü" onload="onImageLoad()">
                     </div>
                 </div>
             </div>
@@ -224,18 +231,14 @@ def home():
 
             function refreshScreenshot() {
                 const img = document.getElementById('ssImage');
-                img.src = '/screenshot?t=' + new Date().getTime();
+                if (img) {
+                    img.src = '/screenshot?t=' + new Date().getTime();
+                }
             }
 
             function onImageLoad() {
-                document.getElementById('ssImage').style.display = 'block';
-                document.getElementById('ssPlaceholder').style.display = 'none';
                 const now = new Date();
                 document.getElementById('ssTime').innerText = now.toLocaleTimeString();
-            }
-
-            function onImageError() {
-                // Ekran görüntüsü henüz hazır değilse
             }
 
             function startSignup() {
@@ -249,7 +252,8 @@ def home():
                 badge.style.color = "#f59e0b";
                 term.textContent = "[*] İşlem başlatıldı...\n";
 
-                // Her 2 saniyede bir ekran görüntüsünü tazele
+                // Başlar başlamaz ve periyodik olarak ekran görüntüsünü tazele
+                refreshScreenshot();
                 if (ssInterval) clearInterval(ssInterval);
                 ssInterval = setInterval(refreshScreenshot, 2000);
 
@@ -306,6 +310,7 @@ def stream_signup():
         yield f"data: [*] Üretilen e-posta: {test_email}\n\n"
 
         context = None
+        page = None
         try:
             with sync_playwright() as p:
                 launch_args = [
@@ -341,8 +346,9 @@ def stream_signup():
 
                 # 1. https://viw.ai/ açılıyor
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
-                page.goto("https://viw.ai/", wait_until="networkidle", timeout=60000)
-                save_screenshot(page)
+                page.goto("https://viw.ai/", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2000)
+                save_screenshot(page, "1-page-opened")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 # 2. Giriş Modalı
@@ -352,7 +358,7 @@ def stream_signup():
                 if login_btn.count() > 0:
                     login_btn.click(force=True)
                     page.wait_for_timeout(2000)
-                save_screenshot(page)
+                save_screenshot(page, "2-login-clicked")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 # 3. Continue with Email
@@ -362,7 +368,7 @@ def stream_signup():
                 if email_btn.count() > 0:
                     email_btn.click(force=True)
                     page.wait_for_timeout(2000)
-                save_screenshot(page)
+                save_screenshot(page, "3-email-btn-clicked")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 # 4. E-posta Girişi
@@ -371,19 +377,19 @@ def stream_signup():
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
-                save_screenshot(page)
+                save_screenshot(page, "4-email-filled")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 # 5. Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
-                for i in range(20):
+                for i in range(25):
                     token = page.evaluate("""() => {
                         const el = document.querySelector('input[name="cf-turnstile-response"]');
                         return el ? el.value : '';
                     }""")
                     if token:
                         yield f"data:     [+] Turnstile token hazır! (Uzunluk: {len(token)})\n\n"
-                        save_screenshot(page)
+                        save_screenshot(page, "5-token-ready")
                         yield f"data: [SS_UPDATE]\n\n"
                         break
 
@@ -397,8 +403,8 @@ def stream_signup():
                         pass
 
                     page.wait_for_timeout(1000)
-                    if i % 3 == 0:
-                        save_screenshot(page)
+                    if i % 2 == 0:
+                        save_screenshot(page, f"5-turnstile-wait-{i}")
                         yield f"data: [SS_UPDATE]\n\n"
 
                 # 6. Form Gönderimi (Submit)
@@ -407,7 +413,7 @@ def stream_signup():
                 if submit_btn.count() > 0:
                     submit_btn.click()
                     page.wait_for_timeout(4000)
-                save_screenshot(page)
+                save_screenshot(page, "6-form-submitted")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 # 7. SpamOk Mail Bekleme
@@ -454,9 +460,9 @@ def stream_signup():
 
                 # 8. Linke tarayıcı üzerinden git ve oturumu tamamla
                 yield f"data: [8] Doğrulama linki açılıyor...\n\n"
-                page.goto(magic_link, wait_until="networkidle", timeout=45000)
+                page.goto(magic_link, wait_until="domcontentloaded", timeout=45000)
                 page.wait_for_timeout(3000)
-                save_screenshot(page)
+                save_screenshot(page, "8-magic-link-opened")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 # 9. Oturum Bilgisini Al
@@ -484,7 +490,7 @@ def stream_signup():
                 except Exception as fe:
                     yield f"data: [!] Çerez kaydedilirken hata: {fe}\n\n"
 
-                save_screenshot(page)
+                save_screenshot(page, "10-final-session")
                 yield f"data: [SS_UPDATE]\n\n"
 
                 yield f"data: \n\n"
@@ -500,11 +506,12 @@ def stream_signup():
         except Exception as err:
             yield f"data: [HATA] Bir hata oluştu: {str(err)}\n\n"
             yield f"data: [BITTI]\n\n"
-            if context:
+            if page:
                 try:
-                    save_screenshot(page)
+                    save_screenshot(page, "error")
                 except Exception:
                     pass
+            if context:
                 try:
                     context.close()
                 except Exception:
