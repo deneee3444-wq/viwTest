@@ -26,41 +26,6 @@ def generate_random_prefix(length: int = 12) -> str:
     return "".join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 
-def wait_for_magic_link_stream(local: str, timeout: int = 120):
-    """SpamOk gelen kutusunu kontrol ederek doğrulama linkini alır."""
-    deadline = time.time() + timeout
-    seen_ids = set()
-    yield f"data: [*] '{local}@spamok.com' gelen kutusu dinleniyor (zaman aşımı: {timeout}s)...\n\n"
-
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"{SPAMOK_API}/EmailBox/{local}", timeout=15)
-            if r.ok:
-                mails = r.json().get("mails", [])
-                for m in mails:
-                    if "Viw AI" not in m.get("subject", ""):
-                        continue
-                    mid = m["id"]
-                    if mid in seen_ids:
-                        continue
-                    seen_ids.add(mid)
-                    d = requests.get(f"{SPAMOK_API}/Email/{local}/{mid}", timeout=15).json()
-                    text = d.get("messagePlain", "") + "\n" + d.get("messageHtml", "")
-                    match = re.search(
-                        r"https://viw\.ai/api/auth/magic-link/verify\?token=[^\s\"'<>&]+(?:&amp;|&)callbackURL=[^\s\"'<>]+",
-                        text,
-                    )
-                    if match:
-                        link = match.group(0).replace("&amp;", "&")
-                        yield f"data: [+] Doğrulama linki alındı: {link}\n\n"
-                        return link
-        except Exception as err:
-            yield f"data: [!] Mail kontrolü sırasında hata: {err}\n\n"
-        time.sleep(3)
-
-    raise TimeoutError("Magic link e-postası zaman aşımına uğradı (gelmedi).")
-
-
 @app.get("/favicon.ico")
 def favicon():
     return "", 204
@@ -186,19 +151,24 @@ def home():
 @app.get("/stream-signup")
 def stream_signup():
     def generate():
-        local_prefix = generate_random_prefix(12)
-        test_email = f"{local_prefix}@spamok.com"
-
         yield f"data: ============================================================\n\n"
         yield f"data:  Viw AI - Tam Otomatik Kayıt & Oturum Alma\n\n"
         yield f"data:  Profil Dizini: {PROFILE_DIR}\n\n"
         yield f"data: ============================================================\n\n"
+
+        # 1. Test E-postası oluştur
+        local_prefix = generate_random_prefix(12)
+        test_email = f"{local_prefix}@spamok.com"
         yield f"data: [*] Üretilen e-posta: {test_email}\n\n"
 
+        context = None
         try:
             with sync_playwright() as p:
                 launch_args = [
                     "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
                     "--start-maximized",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -224,31 +194,31 @@ def stream_signup():
 
                 page = context.pages[0] if context.pages else context.new_page()
 
-                # [1] Sayfayı Aç
+                # 1. https://viw.ai/ açılıyor
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
                 page.goto("https://viw.ai/", wait_until="networkidle", timeout=60000)
 
-                # [2] Giriş Modalı
+                # 2. Giriş Modalı
                 yield f"data: [2] Giriş butonu aranıyor...\n\n"
                 login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
                 if login_btn.count() > 0 and login_btn.is_visible():
                     login_btn.click()
                     page.wait_for_timeout(1500)
 
-                # [3] Continue with Email
+                # 3. Continue with Email
                 yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
                 email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
                 if email_btn.count() > 0:
                     email_btn.click()
                     page.wait_for_timeout(1500)
 
-                # [4] E-posta Girişi
+                # 4. E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
 
-                # [5] Turnstile Token ve Etkileşim Kontrolü
+                # 5. Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
                 for i in range(20):
                     token = page.evaluate("""() => {
@@ -270,30 +240,61 @@ def stream_signup():
 
                     page.wait_for_timeout(1000)
 
-                # [6] Form Gönderimi (Submit)
+                # 6. Form Gönderimi (Submit)
                 yield f"data: [6] Form gönderiliyor...\n\n"
                 submit_btn = page.locator("button[type='submit']")
                 if submit_btn.count() > 0:
                     submit_btn.click()
                     page.wait_for_timeout(4000)
 
-                # [7] SpamOk Mail Bekleme
+                # 7. SpamOk Mail Bekleme
                 yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
+                yield f"data: [*] '{local_prefix}@spamok.com' gelen kutusu dinleniyor...\n\n"
+
+                deadline = time.time() + 90
+                seen_ids = set()
                 magic_link = None
-                for msg in wait_for_magic_link_stream(local_prefix, timeout=90):
-                    yield msg
-                    if "http" in msg:
-                        magic_link = msg.split()[-1]
+
+                while time.time() < deadline:
+                    try:
+                        r = requests.get(f"{SPAMOK_API}/EmailBox/{local_prefix}", timeout=15)
+                        if r.ok:
+                            mails = r.json().get("mails", [])
+                            for m in mails:
+                                if "Viw AI" not in m.get("subject", ""):
+                                    continue
+                                mid = m["id"]
+                                if mid in seen_ids:
+                                    continue
+                                seen_ids.add(mid)
+                                d = requests.get(f"{SPAMOK_API}/Email/{local_prefix}/{mid}", timeout=15).json()
+                                text = d.get("messagePlain", "") + "\n" + d.get("messageHtml", "")
+                                match = re.search(
+                                    r"https://viw\.ai/api/auth/magic-link/verify\?token=[^\s\"'<>&]+(?:&amp;|&)callbackURL=[^\s\"'<>]+",
+                                    text,
+                                )
+                                if match:
+                                    magic_link = match.group(0).replace("&amp;", "&")
+                                    break
+                        if magic_link:
+                            break
+                    except Exception as err:
+                        yield f"data: [!] Mail kontrolü sırasında hata: {err}\n\n"
+                    time.sleep(3)
 
                 if not magic_link:
-                    magic_link = wait_for_magic_link_direct(local_prefix)
+                    raise TimeoutError("Magic link e-postası zaman aşımına uğradı (gelmedi).")
 
-                # [8] Linke tarayıcı üzerinden git ve oturumu tamamla
-                yield f"data: [8] Doğrulama linki açılıyor: {magic_link}\n\n"
+                yield f"data: \n\n"
+                yield f"data: [+] Doğrulama linki alındı: {magic_link}\n\n"
+                yield f"data: \n\n"
+
+                # 8. Linke tarayıcı üzerinden git ve oturumu tamamla
+                yield f"data: [8] Doğrulama linki açılıyor...\n\n"
                 page.goto(magic_link, wait_until="networkidle", timeout=45000)
                 page.wait_for_timeout(3000)
 
-                # [9] Oturum Bilgisini Al
+                # 9. Oturum Bilgisini Al
                 session_data = page.evaluate("""async () => {
                     try {
                         const r = await fetch('/api/auth/get-session');
@@ -302,21 +303,26 @@ def stream_signup():
                     return null;
                 }""")
 
-                user_id = session_data.get("user", {}).get("id") if session_data else "Bilinmiyor"
-                cookies = context.cookies()
+                if session_data and session_data.get("user"):
+                    yield f"data: [🎉] BAŞARILI! Oturum açıldı.\n\n"
+                    yield f"data:      Kullanıcı ID: {session_data['user'].get('id')}\n\n"
+                    yield f"data:      E-posta: {session_data['user'].get('email')}\n\n"
+                else:
+                    yield f"data: [*] Sayfa yüklendi, oturum durumu: {session_data}\n\n"
 
-                # Çerezleri diske de kaydet
+                # 10. Çerezleri kaydet
+                cookies = context.cookies()
                 try:
                     with open(COOKIE_FILE, "w", encoding="utf-8") as f:
                         json.dump(cookies, f, indent=2, ensure_ascii=False)
-                except Exception:
-                    pass
+                    yield f"data: [+] Çerezler '{COOKIE_FILE}' dosyasına başarıyla kaydedildi.\n\n"
+                except Exception as fe:
+                    yield f"data: [!] Çerez kaydedilirken hata: {fe}\n\n"
 
                 yield f"data: \n\n"
                 yield f"data: ============================================================\n\n"
-                yield f"data: [🎉] HESAP BAŞARIYLA OLUŞTURULDU & GİRİŞ YAPILDI!\n\n"
+                yield f"data: [🎉] HESAP BAŞARIYLA OLUŞTURULDU!\n\n"
                 yield f"data: E-POSTA       : {test_email}\n\n"
-                yield f"data: KULLANICI ID  : {user_id}\n\n"
                 yield f"data: TOPLAM ÇEREZ  : {len(cookies)}\n\n"
                 yield f"data: ============================================================\n\n"
                 yield f"data: [BITTI]\n\n"
@@ -326,25 +332,13 @@ def stream_signup():
         except Exception as err:
             yield f"data: [HATA] Bir hata oluştu: {str(err)}\n\n"
             yield f"data: [BITTI]\n\n"
+            if context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
-
-
-def wait_for_magic_link_direct(local: str, timeout: int = 60) -> str:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        r = requests.get(f"{SPAMOK_API}/EmailBox/{local}", timeout=15)
-        if r.ok:
-            mails = r.json().get("mails", [])
-            for m in mails:
-                if "Viw AI" in m.get("subject", ""):
-                    d = requests.get(f"{SPAMOK_API}/Email/{local}/{m['id']}", timeout=15).json()
-                    text = d.get("messagePlain", "") + "\n" + d.get("messageHtml", "")
-                    match = re.search(r"https://viw\.ai/api/auth/magic-link/verify\?token=[^\s\"'<>&]+(?:&amp;|&)callbackURL=[^\s\"'<>]+", text)
-                    if match:
-                        return match.group(0).replace("&amp;", "&")
-        time.sleep(2)
-    raise TimeoutError("Magic link alınamadı.")
 
 
 if __name__ == "__main__":
