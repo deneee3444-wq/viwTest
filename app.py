@@ -58,9 +58,14 @@ def wait_for_magic_link_stream(local: str, timeout: int = 100):
     raise TimeoutError("Magic link e-postası zaman aşımına uğradı.")
 
 
+@app.get("/favicon.ico")
+def favicon():
+    return "", 204
+
+
 @app.get("/")
 def home():
-    return """
+    return r"""
     <!doctype html>
     <html lang="tr">
     <head>
@@ -129,14 +134,6 @@ def home():
                 white-space: pre-wrap;
                 word-break: break-all;
             }
-            .badge {
-                display: inline-block;
-                padding: 4px 8px;
-                border-radius: 6px;
-                background: #0369a1;
-                font-size: 12px;
-                color: #e0f2fe;
-            }
         </style>
     </head>
     <body>
@@ -146,7 +143,7 @@ def home():
 
             <button id="btnStart" onclick="startSignup()">🚀 Hesap Aç</button>
 
-            <div class="console-box" id="terminal">Sistem hazır. "Hesap Aç" butonuna basınız...\n</div>
+            <div class="console-box" id="terminal">Sistem hazır. "Hesap Aç" butonuna basınız...</div>
         </div>
 
         <script>
@@ -155,15 +152,15 @@ def home():
                 const term = document.getElementById('terminal');
                 btn.disabled = true;
                 btn.innerText = "⏳ Hesap Oluşturuluyor...";
-                term.innerText = "[*] İşlem başlatıldı...\n";
+                term.textContent = "[*] İşlem başlatıldı...\n";
 
                 const es = new EventSource('/stream-signup');
 
                 es.onmessage = function(e) {
-                    term.innerText += e.data + "\\n";
+                    term.textContent += e.data + "\n";
                     term.scrollTop = term.scrollHeight;
 
-                    if (e.data.includes("[BITTI]") || e.data.includes("[HATA]")) {
+                    if (e.data.indexOf("[BITTI]") !== -1 || e.data.indexOf("[HATA]") !== -1) {
                         es.close();
                         btn.disabled = false;
                         btn.innerText = "🚀 Tekrar Hesap Aç";
@@ -171,7 +168,7 @@ def home():
                 };
 
                 es.onerror = function() {
-                    term.innerText += "\\n[!] Bağlantı sonlandı.\\n";
+                    term.textContent += "\n[!] Akış tamamlandı veya bağlantı kapandı.\n";
                     es.close();
                     btn.disabled = false;
                     btn.innerText = "🚀 Hesap Aç";
