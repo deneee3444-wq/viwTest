@@ -2,22 +2,19 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PORT=10000
+ENV PORT=10000
+ENV DISPLAY=:99
+ENV PYTHONUNBUFFERED=1
 
-RUN pip install --no-cache-dir \
-        flask \
-        gunicorn \
-        playwright \
-        requests \
-    && python -m playwright install --with-deps chromium \
+# Xvfb ve xauth kurulumu
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 
-COPY app.py /app/app.py
+RUN pip install --no-cache-dir flask gunicorn playwright requests \
+    && playwright install --with-deps chromium
+
+COPY app.py .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "exec gunicorn app:app --bind 0.0.0.0:${PORT:-10000} --worker-class gthread --workers 1 --threads 4 --timeout 120 --graceful-timeout 30 --access-logfile - --error-logfile -"]
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & exec gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 1 --threads 4 --timeout 300 app:app"]
