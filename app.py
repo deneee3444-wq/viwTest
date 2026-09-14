@@ -199,7 +199,7 @@ def stream_signup():
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--window-size=1280,800",
+                    "--window-size=1920,1080",
                 ]
 
                 # Persistent context ile başlat
@@ -208,32 +208,29 @@ def stream_signup():
                     headless=True,
                     args=launch_args,
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 800},
+                    viewport={"width": 1920, "height": 1080},
                 )
 
                 page = context.pages[0] if context.pages else context.new_page()
 
-                yield f"data: [2] https://viw.ai/ açılıyor...\n\n"
-                page.goto("https://viw.ai/", wait_until="networkidle", timeout=60000)
+                # Doğrudan /login sayfasına git
+                yield f"data: [2] https://viw.ai/login açılıyor...\n\n"
+                page.goto("https://viw.ai/login", wait_until="networkidle", timeout=60000)
+                page.wait_for_timeout(2000)
 
-                yield f"data: [3] Giriş modalı tetikleniyor...\n\n"
-                login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
-                if login_btn.count() > 0 and login_btn.is_visible():
-                    login_btn.click()
-                    page.wait_for_timeout(1500)
-
-                yield f"data: [4] 'Continue with Email' seçeneği tıklanıyor...\n\n"
+                yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
                 email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
                 if email_btn.count() > 0:
                     email_btn.click()
                     page.wait_for_timeout(1500)
 
-                yield f"data: [5] E-posta yazılıyor: {test_email}\n\n"
+                yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
+                page.wait_for_selector("input#email, input[type='email']", timeout=15000)
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
 
-                yield f"data: [6] Turnstile token kontrol ediliyor...\n\n"
+                yield f"data: [5] Turnstile token kontrol ediliyor...\n\n"
                 turnstile_token = None
                 for i in range(25):
                     token = page.evaluate("""() => {
@@ -256,8 +253,8 @@ def stream_signup():
 
                     page.wait_for_timeout(1000)
 
-                yield f"data: [7] Form gönderiliyor...\n\n"
-                submit_btn = page.locator("button[type='submit']")
+                yield f"data: [6] Form gönderiliyor...\n\n"
+                submit_btn = page.locator("button[type='submit']").last
                 if submit_btn.count() > 0:
                     submit_btn.click()
                     page.wait_for_timeout(4000)
@@ -270,10 +267,9 @@ def stream_signup():
                         magic_link = msg.split()[-1]
 
                 if not magic_link:
-                    # Alternatif doğrudan yakalama
                     magic_link = wait_for_magic_link_direct(local_prefix)
 
-                yield f"data: [8] Doğrulama linki tarayıcıda açılıyor: {magic_link}\n\n"
+                yield f"data: [7] Doğrulama linki tarayıcıda açılıyor: {magic_link}\n\n"
                 page.goto(magic_link, wait_until="networkidle", timeout=45000)
                 page.wait_for_timeout(3000)
 
