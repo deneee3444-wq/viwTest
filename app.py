@@ -402,42 +402,42 @@ def stream_signup():
 
                 page = context.pages[0] if context.pages else context.new_page()
 
-                # [1] https://viw.ai/ açılıyor (networkidle tam yüklenme garantiler)
+                # [1] https://viw.ai/ açılıyor (networkidle tam yüklenme garantiler - max 5 dk)
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
                 try:
-                    page.goto("https://viw.ai/", wait_until="networkidle", timeout=45000)
+                    page.goto("https://viw.ai/", wait_until="networkidle", timeout=300000)
                 except Exception:
-                    page.goto("https://viw.ai/", wait_until="domcontentloaded", timeout=45000)
+                    page.goto("https://viw.ai/", wait_until="domcontentloaded", timeout=300000)
                     page.wait_for_timeout(3000)
 
                 yield f"data: [*] Sayfa yüklendi: '{page.title()}'\n\n"
 
-                # [2] Giriş butonu aranıyor (test_local_profile.py ile birebir aynı)
+                # [2] Giriş butonu aranıyor (Otomatik algılar, geldiği an tıklar - max 5 dk)
                 yield f"data: [2] Giriş butonu aranıyor...\n\n"
-                page.wait_for_selector("a:has-text('Login'), button:has-text('Login')", timeout=20000)
+                page.wait_for_selector("a:has-text('Login'), button:has-text('Login')", timeout=300000)
                 login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
                 if login_btn.count() > 0 and login_btn.is_visible():
                     login_btn.click()
                     page.wait_for_timeout(2000)
 
-                # [3] 'Continue with Email' seçeneği tıklanıyor
+                # [3] 'Continue with Email' seçeneği tıklanıyor (Otomatik algılar - max 5 dk)
                 yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
-                page.wait_for_selector("button:has-text('Continue with Email'), span:has-text('Continue with Email')", timeout=15000)
+                page.wait_for_selector("button:has-text('Continue with Email'), span:has-text('Continue with Email')", timeout=300000)
                 email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
                 if email_btn.count() > 0:
                     email_btn.click()
                     page.wait_for_timeout(2000)
 
-                # [4] E-posta Girişi
+                # [4] E-posta Girişi (Otomatik algılar - max 5 dk)
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
-                page.wait_for_selector("input#email, input[type='email']", timeout=15000)
+                page.wait_for_selector("input#email, input[type='email']", timeout=300000)
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
 
                 # [5] Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
-                for i in range(25):
+                for i in range(35):
                     yield ": ping\n\n"
                     token = page.evaluate("""() => {
                         const el = document.querySelector('input[name="cf-turnstile-response"]');
@@ -465,11 +465,11 @@ def stream_signup():
                     submit_btn.click(force=True)
                     page.wait_for_timeout(4000)
 
-                # [7] SpamOk Mail Bekleme
+                # [7] SpamOk Mail Bekleme (max 5 dk)
                 yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
                 yield f"data: [*] '{local_prefix}@spamok.com' gelen kutusu dinleniyor...\n\n"
 
-                deadline = time.time() + 90
+                deadline = time.time() + 300
                 seen_ids = set()
                 magic_link = None
 
@@ -508,9 +508,9 @@ def stream_signup():
                 yield f"data: [+] Doğrulama linki alındı: {magic_link}\n\n"
                 yield f"data: \n\n"
 
-                # [8] Linke tarayıcı üzerinden git ve oturumu tamamla
+                # [8] Linke tarayıcı üzerinden git ve oturumu tamamla (max 5 dk)
                 yield f"data: [8] Doğrulama linki açılıyor...\n\n"
-                page.goto(magic_link, wait_until="networkidle", timeout=45000)
+                page.goto(magic_link, wait_until="networkidle", timeout=300000)
                 page.wait_for_timeout(3000)
 
                 # [9] Oturum Bilgisini Al
