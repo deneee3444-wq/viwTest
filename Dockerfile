@@ -6,11 +6,11 @@ ENV PORT=10000
 ENV DISPLAY=:99
 ENV PYTHONUNBUFFERED=1
 
-# Xvfb ve xauth kurulumu
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth \
+# Xvfb, xauth ve anlık ekran yakalama (scrot) kurulumu
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth scrot \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir flask gunicorn playwright requests \
+RUN pip install --no-cache-dir flask gunicorn playwright requests pillow \
     && playwright install --with-deps chromium
 
 COPY app.py .
