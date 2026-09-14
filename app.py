@@ -44,7 +44,7 @@ def capture_screen():
     """İşletim sistemi / X11 ekran görüntüsü alır (Thread-safe, Playwright'ı kilitlemez)."""
     ss_request_event.set()
 
-    # 1. Linux / Xvfb ortamında scrot ile doğrudan yakala
+    # 1. Linux / Xvfb ortamında scrot ile anında yakala
     if os.name != "nt":
         try:
             disp = os.environ.get("DISPLAY", ":99")
@@ -448,44 +448,97 @@ def stream_signup():
                     page.wait_for_timeout(3000)
 
                 # 2. Giriş Modalı
-                yield f"data: [2] Giriş butonu açılıyor...\n\n"
-                yield ": ping\n\n"
+                yield f"data: [2] Giriş butonu bekleniyor ve açılıyor...\n\n"
+
+                # Render ve React hydration gecikmesi için Login butonunun DOM'da belirmesini bekle
+                login_btn = None
+                for _ in range(20):
+                    check_and_handle_ss_request(page)
+                    yield ": ping\n\n"
+                    btn = page.locator("a:has-text('Login'), button:has-text('Login'), a[href*='/login']").first
+                    if btn.count() > 0 and btn.is_visible():
+                        login_btn = btn
+                        break
+                    page.wait_for_timeout(1000)
+
+                # React hydration ve modal açılışı için tıklama kontrol döngüsü
+                modal_opened = False
+                for attempt in range(5):
+                    check_and_handle_ss_request(page)
+                    yield ": ping\n\n"
+
+                    # Eğer modal veya Continue with Email zaten geldiyse devam et
+                    if page.locator("button:has-text('Continue with Email'), input#email, input[type='email']").count() > 0:
+                        modal_opened = True
+                        break
+
+                    yield f"data: [*] Giriş butonuna tıklanıyor (Deneme {attempt + 1}/5)...\n\n"
+
+                    try:
+                        if login_btn and login_btn.count() > 0:
+                            login_btn.click(force=True)
+                    except Exception:
+                        pass
+
+                    try:
+                        page.evaluate("""() => {
+                            const el = document.querySelector('a[href*="/login"], a[href="/login"]') || 
+                                       Array.from(document.querySelectorAll('a, button')).find(e => e.innerText && e.innerText.trim().toLowerCase() === 'login');
+                            if (el) el.click();
+                        }""")
+                    except Exception:
+                        pass
+
+                    for _ in range(4):
+                        yield ": ping\n\n"
+                        check_and_handle_ss_request(page)
+                        if page.locator("button:has-text('Continue with Email'), input#email, input[type='email']").count() > 0:
+                            modal_opened = True
+                            break
+                        page.wait_for_timeout(500)
+
+                    if modal_opened:
+                        break
+
+                yield f"data: [+] Giriş modalı açıldı!\n\n"
                 page.wait_for_timeout(1000)
                 check_and_handle_ss_request(page)
 
-                # Modal açma: Önce locator, sonra JS click
-                login_btn = page.locator("a:has-text('Login'), button:has-text('Login'), a[href*='/login']").first
-                if login_btn.count() > 0 and login_btn.is_visible():
-                    login_btn.click(force=True)
-                else:
-                    page.evaluate("""() => {
-                        const el = document.querySelector('a[href*="/login"], a[href="/login"]');
-                        if (el) el.click();
-                    }""")
-
-                page.wait_for_timeout(2000)
-                check_and_handle_ss_request(page)
-                yield ": ping\n\n"
-
                 # 3. Continue with Email
-                yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
-                email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email'), text='Continue with Email'").first
-                if email_btn.count() > 0:
-                    email_btn.click(force=True)
-                else:
-                    page.evaluate("""() => {
-                        const btns = Array.from(document.querySelectorAll('button, span'));
-                        const b = btns.find(x => x.textContent && x.textContent.includes('Continue with Email'));
-                        if (b) b.click();
-                    }""")
+                yield f"data: [3] 'Continue with Email' seçeneği kontrol ediliyor...\n\n"
+                email_step_ready = False
 
-                page.wait_for_timeout(2000)
+                for attempt in range(5):
+                    check_and_handle_ss_request(page)
+                    yield ": ping\n\n"
+
+                    # Doğrudan email inputu açıldıysa devam et
+                    if page.locator("input#email, input[type='email']").count() > 0 and page.locator("input#email, input[type='email']").first.is_visible():
+                        email_step_ready = True
+                        break
+
+                    email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email'), text='Continue with Email'").first
+                    if email_btn.count() > 0 and email_btn.is_visible():
+                        yield f"data: [*] 'Continue with Email' tıklanıyor...\n\n"
+                        email_btn.click(force=True)
+
+                    for _ in range(4):
+                        yield ": ping\n\n"
+                        check_and_handle_ss_request(page)
+                        if page.locator("input#email, input[type='email']").count() > 0 and page.locator("input#email, input[type='email']").first.is_visible():
+                            email_step_ready = True
+                            break
+                        page.wait_for_timeout(500)
+
+                    if email_step_ready:
+                        break
+
+                yield f"data: [+] E-posta giriş formu hazır!\n\n"
+                page.wait_for_timeout(1000)
                 check_and_handle_ss_request(page)
-                yield ": ping\n\n"
 
                 # 4. E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
-                page.wait_for_selector("input#email, input[type='email']", timeout=15000)
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
@@ -494,7 +547,7 @@ def stream_signup():
 
                 # 5. Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
-                for i in range(25):
+                for i in range(30):
                     yield ": ping\n\n"
                     check_and_handle_ss_request(page)
                     token = page.evaluate("""() => {
