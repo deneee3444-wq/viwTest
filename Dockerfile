@@ -2,19 +2,44 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-ENV PORT=10000
-ENV DISPLAY=:99
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PORT=10000
 
-# Xvfb ve xauth kurulumu
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+        xvfb \
+        xauth \
+        fonts-dejavu-core \
+        fonts-liberation \
+        fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir flask gunicorn playwright requests \
-    && playwright install --with-deps chromium
+RUN python -m pip install --no-cache-dir \
+        "Flask>=3.0,<4" \
+        "gunicorn>=22,<24" \
+        "playwright>=1.49,<2" \
+        "requests>=2.32,<3" \
+    && python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY app.py .
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid appuser --create-home appuser \
+    && chown appuser:appuser /app
+
+COPY --chown=appuser:appuser app.py /app/app.py
+
+USER appuser
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & exec gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 1 --threads 4 --timeout 300 app:app"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# xvfb-run, sanal ekran hazır olduktan sonra Gunicorn'u başlatır.
+# Tek worker gereklidir: işlem durumu ve görüntü bellekte tutulur.
+CMD ["sh", "-c", "exec xvfb-run -a -s '-screen 0 1366x768x24 -nolisten tcp' gunicorn app:app --bind 0.0.0.0:${PORT:-10000} --worker-class gthread --workers 1 --threads 8 --timeout 420 --graceful-timeout 30 --keep-alive 5 --access-logfile - --error-logfile - --capture-output"]
