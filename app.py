@@ -281,7 +281,7 @@ async def signup(job):
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            headless=True,
+            headless=False,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
