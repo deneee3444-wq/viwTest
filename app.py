@@ -5,8 +5,10 @@ import json
 import time
 import random
 import string
+import threading
+import subprocess
 import requests
-from flask import Flask, Response, stream_with_context, send_file
+from flask import Flask, Response, stream_with_context
 from playwright.sync_api import sync_playwright
 
 if sys.platform == "win32":
@@ -21,13 +23,15 @@ PROFILE_DIR = os.path.abspath("./chrome_profile") if os.name == "nt" else "/tmp/
 COOKIE_FILE = os.path.abspath("./session_cookies.json")
 SCREENSHOT_FILE = os.path.abspath("./latest_screenshot.png") if os.name == "nt" else "/tmp/latest_screenshot.png"
 
+ss_request_event = threading.Event()
+
 PLACEHOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
   <rect width="100%" height="100%" fill="#020617"/>
   <rect x="20" y="20" width="760" height="410" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
   <circle cx="400" cy="190" r="36" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
   <path d="M388 190 L412 190 M400 178 L400 202" stroke="#38bdf8" stroke-width="3" stroke-linecap="round"/>
-  <text x="400" y="260" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="500" text-anchor="middle">Ekran görüntüsü bekleniyor...</text>
-  <text x="400" y="285" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" text-anchor="middle">İşlem başladığında anlık olarak güncellenecektir</text>
+  <text x="400" y="260" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="500" text-anchor="middle">Ekran görüntüsü henüz alınmadı</text>
+  <text x="400" y="285" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" text-anchor="middle">İstediğiniz an "📸 Anlık SS Al" butonuna basabilirsiniz</text>
 </svg>"""
 
 
@@ -36,14 +40,50 @@ def generate_random_prefix(length: int = 12) -> str:
     return "".join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 
-def save_screenshot(page, desc: str = ""):
-    """Anlık tarayıcı ekran görüntüsünü dosyaya kaydeder."""
+def capture_screen():
+    """İşletim sistemi / X11 ekran görüntüsü alır (Thread-safe, Playwright'ı kilitlemez)."""
+    # 1. Playwright thread'ine de istek sinyali gönder
+    ss_request_event.set()
+
+    # 2. Linux / Xvfb ortamında scrot ile anında yakala
+    if os.name != "nt":
+        try:
+            disp = os.environ.get("DISPLAY", ":99")
+            res = subprocess.run(
+                ["scrot", "-o", SCREENSHOT_FILE],
+                env={**os.environ, "DISPLAY": disp},
+                capture_output=True,
+                timeout=4,
+            )
+            if res.returncode == 0 and os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0:
+                return True
+        except Exception:
+            pass
+
+    # 3. Windows veya Pillow fallback
     try:
-        page.screenshot(path=SCREENSHOT_FILE, full_page=False)
+        from PIL import ImageGrab
+        im = ImageGrab.grab()
+        im.save(SCREENSHOT_FILE)
         return True
-    except Exception as e:
-        print(f"[SS HATA] {desc}: {e}")
-        return False
+    except Exception:
+        pass
+
+    # Playwright thread'inin kaydetmesi için kısa bekleme
+    time.sleep(0.4)
+    return os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0
+
+
+def check_and_handle_ss_request(page):
+    """Playwright döngüleri içindeyken kullanıcı SS istemişse yakalar."""
+    if ss_request_event.is_set():
+        ss_request_event.clear()
+        try:
+            data = page.screenshot(timeout=3000, full_page=False)
+            with open(SCREENSHOT_FILE, "wb") as f:
+                f.write(data)
+        except Exception:
+            pass
 
 
 @app.get("/favicon.ico")
@@ -51,16 +91,50 @@ def favicon():
     return "", 204
 
 
+@app.get("/take-screenshot")
+def take_screenshot_endpoint():
+    """Kullanıcı butona bastığında anlık ekran görüntüsü alır."""
+    capture_screen()
+    for path in [SCREENSHOT_FILE, "/tmp/latest_screenshot.png", "./latest_screenshot.png"]:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                return Response(
+                    data,
+                    mimetype="image/png",
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+                )
+            except Exception:
+                pass
+
+    return Response(
+        PLACEHOLDER_SVG,
+        mimetype="image/svg+xml",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
 @app.get("/screenshot")
 def get_screenshot():
-    if os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0:
-        response = send_file(SCREENSHOT_FILE, mimetype="image/png")
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return response
+    for path in [SCREENSHOT_FILE, "/tmp/latest_screenshot.png", "./latest_screenshot.png"]:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                return Response(
+                    data,
+                    mimetype="image/png",
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+                )
+            except Exception:
+                pass
 
-    response = Response(PLACEHOLDER_SVG, mimetype="image/svg+xml")
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    return response
+    return Response(
+        PLACEHOLDER_SVG,
+        mimetype="image/svg+xml",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/")
@@ -104,7 +178,7 @@ def home():
                 margin-bottom: 20px;
             }
             button {
-                padding: 14px 20px;
+                padding: 14px 22px;
                 font-size: 15px;
                 font-weight: 600;
                 border-radius: 10px;
@@ -120,14 +194,14 @@ def home():
             #btnStart:hover { opacity: 0.95; transform: translateY(-1px); }
             #btnStart:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             #btnSS {
-                background: #334155;
-                color: #e2e8f0;
-                border: 1px solid #475569;
+                background: linear-gradient(135deg, #059669, #10b981);
+                color: #ffffff;
                 display: flex;
                 align-items: center;
-                gap: 6px;
+                gap: 8px;
             }
-            #btnSS:hover { background: #475569; }
+            #btnSS:hover { opacity: 0.95; }
+            #btnSS:disabled { opacity: 0.6; cursor: wait; }
             .main-grid {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
@@ -196,11 +270,11 @@ def home():
     <body>
         <div class="card">
             <h1><span>⚡</span> Viw.AI Otomatik Hesap Açıcı</h1>
-            <p>Canlı tarayıcı oturumu ve işlem logları eş zamanlı olarak aşağıda görüntülenir.</p>
+            <p>Hesap açma sürecini başlatabilir, sağdaki butonla istediğiniz an tarayıcının ekran görüntüsünü alabilirsiniz.</p>
 
             <div class="button-row">
                 <button id="btnStart" onclick="startSignup()">🚀 Hesap Aç</button>
-                <button id="btnSS" onclick="refreshScreenshot()">📸 Anlık SS Al / Yenile</button>
+                <button id="btnSS" onclick="takeManualScreenshot()">📸 Anlık SS Al</button>
             </div>
 
             <div class="main-grid">
@@ -216,29 +290,43 @@ def home():
                 <!-- Sağ Panel: Canlı Ekran Görüntüsü -->
                 <div class="panel">
                     <div class="panel-header">
-                        <span>📸 Canlı Tarayıcı Ekranı</span>
-                        <span id="ssTime" class="badge">Başlangıç</span>
+                        <span>📸 Tarayıcı Ekranı</span>
+                        <span id="ssTime" class="badge">Henüz alınmadı</span>
                     </div>
                     <div class="ss-container">
-                        <img id="ssImage" src="/screenshot" alt="Canlı Ekran Görüntüsü" onload="onImageLoad()">
+                        <img id="ssImage" src="/screenshot" alt="Tarayıcı Ekranı">
                     </div>
                 </div>
             </div>
         </div>
 
         <script>
-            let ssInterval = null;
-
-            function refreshScreenshot() {
+            async function takeManualScreenshot() {
+                const btn = document.getElementById('btnSS');
                 const img = document.getElementById('ssImage');
-                if (img) {
-                    img.src = '/screenshot?t=' + new Date().getTime();
-                }
-            }
+                const badge = document.getElementById('ssTime');
 
-            function onImageLoad() {
-                const now = new Date();
-                document.getElementById('ssTime').innerText = now.toLocaleTimeString();
+                btn.disabled = true;
+                const origText = btn.innerText;
+                btn.innerText = "⏳ SS Çekiliyor...";
+                badge.innerText = "Çekiliyor...";
+
+                try {
+                    const response = await fetch('/take-screenshot?t=' + new Date().getTime());
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        img.src = URL.createObjectURL(blob);
+                        badge.innerText = new Date().toLocaleTimeString();
+                    } else {
+                        badge.innerText = "Alınamadı";
+                    }
+                } catch (err) {
+                    console.error("SS Alma Hatası:", err);
+                    badge.innerText = "Hata";
+                } finally {
+                    btn.disabled = false;
+                    btn.innerText = origText;
+                }
             }
 
             function startSignup() {
@@ -252,26 +340,14 @@ def home():
                 badge.style.color = "#f59e0b";
                 term.textContent = "[*] İşlem başlatıldı...\n";
 
-                // Başlar başlamaz ve periyodik olarak ekran görüntüsünü tazele
-                refreshScreenshot();
-                if (ssInterval) clearInterval(ssInterval);
-                ssInterval = setInterval(refreshScreenshot, 2000);
-
                 const es = new EventSource('/stream-signup');
 
                 es.onmessage = function(e) {
-                    if (e.data === "[SS_UPDATE]") {
-                        refreshScreenshot();
-                        return;
-                    }
-
                     term.textContent += e.data + "\n";
                     term.scrollTop = term.scrollHeight;
 
                     if (e.data.indexOf("[BITTI]") !== -1 || e.data.indexOf("[HATA]") !== -1) {
                         es.close();
-                        if (ssInterval) clearInterval(ssInterval);
-                        refreshScreenshot();
                         btn.disabled = false;
                         btn.innerText = "🚀 Tekrar Hesap Aç";
                         badge.innerText = e.data.indexOf("[HATA]") !== -1 ? "Hata" : "Tamamlandı";
@@ -282,8 +358,6 @@ def home():
                 es.onerror = function() {
                     term.textContent += "\n[!] Akış tamamlandı veya bağlantı kapandı.\n";
                     es.close();
-                    if (ssInterval) clearInterval(ssInterval);
-                    refreshScreenshot();
                     btn.disabled = false;
                     btn.innerText = "🚀 Hesap Aç";
                     badge.innerText = "Bağlantı Kapandı";
@@ -318,6 +392,8 @@ def stream_signup():
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
                     "--window-size=1920,1080",
                     "--start-maximized",
                     "--no-first-run",
@@ -348,28 +424,70 @@ def stream_signup():
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
                 page.goto("https://viw.ai/", wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(2000)
-                save_screenshot(page, "1-page-opened")
-                yield f"data: [SS_UPDATE]\n\n"
+                check_and_handle_ss_request(page)
+
+                page_title = page.title()
+                current_url = page.url
+                yield f"data: [*] Sayfa yüklendi: '{page_title}' ({current_url})\n\n"
+
+                # Cloudflare kontrolü
+                if "Just a moment" in page_title or "Cloudflare" in page_title or page.locator("iframe[src*='challenges.cloudflare.com']").count() > 0:
+                    yield f"data: [!] Cloudflare koruma sayfası tespit edildi! Çözülüyor...\n\n"
+                    for _ in range(20):
+                        check_and_handle_ss_request(page)
+                        try:
+                            ts_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
+                            cb = ts_frame.locator("input[type='checkbox'], label, #challenge-stage").first
+                            if cb.count() > 0 and cb.is_visible():
+                                cb.click(force=True, timeout=2000)
+                                break
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(1000)
+                    page.wait_for_timeout(3000)
 
                 # 2. Giriş Modalı
-                yield f"data: [2] Giriş butonu aranıyor...\n\n"
-                page.wait_for_selector("a:has-text('Login'), button:has-text('Login')", timeout=15000)
-                login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
-                if login_btn.count() > 0:
-                    login_btn.click(force=True)
-                    page.wait_for_timeout(2000)
-                save_screenshot(page, "2-login-clicked")
-                yield f"data: [SS_UPDATE]\n\n"
+                yield f"data: [2] Giriş butonu açılıyor...\n\n"
+                page.wait_for_timeout(1000)
+                check_and_handle_ss_request(page)
+
+                # Javascript ile tıklamayı tetikle (CSS display:none veya responsive boyuttan etkilenmez)
+                opened = page.evaluate("""() => {
+                    const el = document.querySelector('a[href*="/login"], a[href="/login"]') || 
+                               Array.from(document.querySelectorAll('a, button')).find(e => e.innerText && e.innerText.trim().toLowerCase() === 'login');
+                    if (el) {
+                        el.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+
+                if not opened:
+                    login_btn = page.locator("a:has-text('Login'), button:has-text('Login'), a[href*='/login']").first
+                    if login_btn.count() > 0:
+                        login_btn.click(force=True)
+
+                page.wait_for_timeout(2000)
+                check_and_handle_ss_request(page)
 
                 # 3. Continue with Email
                 yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
-                page.wait_for_selector("button:has-text('Continue with Email'), span:has-text('Continue with Email')", timeout=15000)
-                email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
-                if email_btn.count() > 0:
-                    email_btn.click(force=True)
-                    page.wait_for_timeout(2000)
-                save_screenshot(page, "3-email-btn-clicked")
-                yield f"data: [SS_UPDATE]\n\n"
+                email_btn_clicked = page.evaluate("""() => {
+                    const btn = Array.from(document.querySelectorAll('button, span, div')).find(e => e.innerText && e.innerText.includes('Continue with Email'));
+                    if (btn) {
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+
+                if not email_btn_clicked:
+                    email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
+                    if email_btn.count() > 0:
+                        email_btn.click(force=True)
+
+                page.wait_for_timeout(2000)
+                check_and_handle_ss_request(page)
 
                 # 4. E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
@@ -377,20 +495,18 @@ def stream_signup():
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
-                save_screenshot(page, "4-email-filled")
-                yield f"data: [SS_UPDATE]\n\n"
+                check_and_handle_ss_request(page)
 
                 # 5. Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
                 for i in range(25):
+                    check_and_handle_ss_request(page)
                     token = page.evaluate("""() => {
                         const el = document.querySelector('input[name="cf-turnstile-response"]');
                         return el ? el.value : '';
                     }""")
                     if token:
                         yield f"data:     [+] Turnstile token hazır! (Uzunluk: {len(token)})\n\n"
-                        save_screenshot(page, "5-token-ready")
-                        yield f"data: [SS_UPDATE]\n\n"
                         break
 
                     # Turnstile frame kontrolü ve tıklama
@@ -403,18 +519,14 @@ def stream_signup():
                         pass
 
                     page.wait_for_timeout(1000)
-                    if i % 2 == 0:
-                        save_screenshot(page, f"5-turnstile-wait-{i}")
-                        yield f"data: [SS_UPDATE]\n\n"
 
                 # 6. Form Gönderimi (Submit)
                 yield f"data: [6] Form gönderiliyor...\n\n"
+                check_and_handle_ss_request(page)
                 submit_btn = page.locator("button[type='submit']")
                 if submit_btn.count() > 0:
-                    submit_btn.click()
+                    submit_btn.click(force=True)
                     page.wait_for_timeout(4000)
-                save_screenshot(page, "6-form-submitted")
-                yield f"data: [SS_UPDATE]\n\n"
 
                 # 7. SpamOk Mail Bekleme
                 yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
@@ -425,6 +537,7 @@ def stream_signup():
                 magic_link = None
 
                 while time.time() < deadline:
+                    check_and_handle_ss_request(page)
                     try:
                         r = requests.get(f"{SPAMOK_API}/EmailBox/{local_prefix}", timeout=15)
                         if r.ok:
@@ -462,8 +575,7 @@ def stream_signup():
                 yield f"data: [8] Doğrulama linki açılıyor...\n\n"
                 page.goto(magic_link, wait_until="domcontentloaded", timeout=45000)
                 page.wait_for_timeout(3000)
-                save_screenshot(page, "8-magic-link-opened")
-                yield f"data: [SS_UPDATE]\n\n"
+                check_and_handle_ss_request(page)
 
                 # 9. Oturum Bilgisini Al
                 session_data = page.evaluate("""async () => {
@@ -490,8 +602,7 @@ def stream_signup():
                 except Exception as fe:
                     yield f"data: [!] Çerez kaydedilirken hata: {fe}\n\n"
 
-                save_screenshot(page, "10-final-session")
-                yield f"data: [SS_UPDATE]\n\n"
+                check_and_handle_ss_request(page)
 
                 yield f"data: \n\n"
                 yield f"data: ============================================================\n\n"
@@ -505,12 +616,14 @@ def stream_signup():
 
         except Exception as err:
             yield f"data: [HATA] Bir hata oluştu: {str(err)}\n\n"
-            yield f"data: [BITTI]\n\n"
             if page:
                 try:
-                    save_screenshot(page, "error")
+                    data = page.screenshot(timeout=3000, full_page=False)
+                    with open(SCREENSHOT_FILE, "wb") as f:
+                        f.write(data)
                 except Exception:
                     pass
+            yield f"data: [BITTI]\n\n"
             if context:
                 try:
                     context.close()
