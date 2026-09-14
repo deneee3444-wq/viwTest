@@ -5,7 +5,6 @@ import json
 import time
 import random
 import string
-import threading
 import subprocess
 import requests
 from flask import Flask, Response, stream_with_context
@@ -23,8 +22,6 @@ PROFILE_DIR = os.path.abspath("./chrome_profile") if os.name == "nt" else "/tmp/
 COOKIE_FILE = os.path.abspath("./session_cookies.json")
 SCREENSHOT_FILE = os.path.abspath("./latest_screenshot.png") if os.name == "nt" else "/tmp/latest_screenshot.png"
 
-ss_request_event = threading.Event()
-
 PLACEHOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
   <rect width="100%" height="100%" fill="#020617"/>
   <rect x="20" y="20" width="760" height="410" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
@@ -40,11 +37,9 @@ def generate_random_prefix(length: int = 12) -> str:
     return "".join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 
-def capture_screen():
-    """İşletim sistemi / X11 ekran görüntüsü alır (Thread-safe, Playwright'ı kilitlemez)."""
-    ss_request_event.set()
-
-    # 1. Linux / Xvfb ortamında scrot ile anında yakala
+def capture_screen_from_system():
+    """Playwright'a dokunmadan doğrudan işletim sistemi/X11 üzerinden anlık ekran görüntüsü alır."""
+    # Linux / Render ortamında Xvfb (:99) üzerinden scrot ile anında yakala
     if os.name != "nt":
         try:
             disp = os.environ.get("DISPLAY", ":99")
@@ -59,7 +54,7 @@ def capture_screen():
         except Exception:
             pass
 
-    # 2. Windows Pillow fallback
+    # Windows ortamında Pillow fallback
     try:
         from PIL import ImageGrab
         im = ImageGrab.grab()
@@ -68,20 +63,7 @@ def capture_screen():
     except Exception:
         pass
 
-    time.sleep(0.3)
-    return os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0
-
-
-def check_and_handle_ss_request(page):
-    """Playwright sayfası etkinken kullanıcı SS istemişse yakalar."""
-    if ss_request_event.is_set():
-        ss_request_event.clear()
-        try:
-            data = page.screenshot(timeout=3000, full_page=False)
-            with open(SCREENSHOT_FILE, "wb") as f:
-                f.write(data)
-        except Exception:
-            pass
+    return False
 
 
 @app.get("/favicon.ico")
@@ -91,8 +73,8 @@ def favicon():
 
 @app.get("/take-screenshot")
 def take_screenshot_endpoint():
-    """Kullanıcı butona bastığında anlık ekran görüntüsü alır."""
-    capture_screen()
+    """Kullanıcı butona bastığında X11/ekran üzerinden anlık SS alır."""
+    capture_screen_from_system()
     for path in [SCREENSHOT_FILE, "/tmp/latest_screenshot.png", "./latest_screenshot.png"]:
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
@@ -420,136 +402,43 @@ def stream_signup():
 
                 page = context.pages[0] if context.pages else context.new_page()
 
-                # 1. https://viw.ai/ açılıyor
+                # [1] https://viw.ai/ açılıyor (networkidle tam yüklenme garantiler)
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
-                page.goto("https://viw.ai/", wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(2000)
-                check_and_handle_ss_request(page)
-
-                page_title = page.title()
-                current_url = page.url
-                yield f"data: [*] Sayfa yüklendi: '{page_title}' ({current_url})\n\n"
-
-                # Cloudflare kontrolü
-                if "Just a moment" in page_title or "Cloudflare" in page_title or page.locator("iframe[src*='challenges.cloudflare.com']").count() > 0:
-                    yield f"data: [!] Cloudflare koruma sayfası tespit edildi! Çözülüyor...\n\n"
-                    for _ in range(20):
-                        yield ": ping\n\n"
-                        check_and_handle_ss_request(page)
-                        try:
-                            ts_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
-                            cb = ts_frame.locator("input[type='checkbox'], label, #challenge-stage").first
-                            if cb.count() > 0 and cb.is_visible():
-                                cb.click(force=True, timeout=2000)
-                                break
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(1000)
+                try:
+                    page.goto("https://viw.ai/", wait_until="networkidle", timeout=45000)
+                except Exception:
+                    page.goto("https://viw.ai/", wait_until="domcontentloaded", timeout=45000)
                     page.wait_for_timeout(3000)
 
-                # 2. Giriş Modalı
-                yield f"data: [2] Giriş butonu bekleniyor ve açılıyor...\n\n"
+                yield f"data: [*] Sayfa yüklendi: '{page.title()}'\n\n"
 
-                # Render ve React hydration gecikmesi için Login butonunun DOM'da belirmesini bekle
-                login_btn = None
-                for _ in range(20):
-                    check_and_handle_ss_request(page)
-                    yield ": ping\n\n"
-                    btn = page.locator("a:has-text('Login'), button:has-text('Login'), a[href*='/login']").first
-                    if btn.count() > 0 and btn.is_visible():
-                        login_btn = btn
-                        break
-                    page.wait_for_timeout(1000)
+                # [2] Giriş butonu aranıyor (test_local_profile.py ile birebir aynı)
+                yield f"data: [2] Giriş butonu aranıyor...\n\n"
+                page.wait_for_selector("a:has-text('Login'), button:has-text('Login')", timeout=20000)
+                login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
+                if login_btn.count() > 0 and login_btn.is_visible():
+                    login_btn.click()
+                    page.wait_for_timeout(2000)
 
-                # React hydration ve modal açılışı için tıklama kontrol döngüsü
-                modal_opened = False
-                for attempt in range(5):
-                    check_and_handle_ss_request(page)
-                    yield ": ping\n\n"
+                # [3] 'Continue with Email' seçeneği tıklanıyor
+                yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
+                page.wait_for_selector("button:has-text('Continue with Email'), span:has-text('Continue with Email')", timeout=15000)
+                email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
+                if email_btn.count() > 0:
+                    email_btn.click()
+                    page.wait_for_timeout(2000)
 
-                    # Eğer modal veya Continue with Email zaten geldiyse devam et
-                    if page.locator("button:has-text('Continue with Email'), input#email, input[type='email']").count() > 0:
-                        modal_opened = True
-                        break
-
-                    yield f"data: [*] Giriş butonuna tıklanıyor (Deneme {attempt + 1}/5)...\n\n"
-
-                    try:
-                        if login_btn and login_btn.count() > 0:
-                            login_btn.click(force=True)
-                    except Exception:
-                        pass
-
-                    try:
-                        page.evaluate("""() => {
-                            const el = document.querySelector('a[href*="/login"], a[href="/login"]') || 
-                                       Array.from(document.querySelectorAll('a, button')).find(e => e.innerText && e.innerText.trim().toLowerCase() === 'login');
-                            if (el) el.click();
-                        }""")
-                    except Exception:
-                        pass
-
-                    for _ in range(4):
-                        yield ": ping\n\n"
-                        check_and_handle_ss_request(page)
-                        if page.locator("button:has-text('Continue with Email'), input#email, input[type='email']").count() > 0:
-                            modal_opened = True
-                            break
-                        page.wait_for_timeout(500)
-
-                    if modal_opened:
-                        break
-
-                yield f"data: [+] Giriş modalı açıldı!\n\n"
-                page.wait_for_timeout(1000)
-                check_and_handle_ss_request(page)
-
-                # 3. Continue with Email
-                yield f"data: [3] 'Continue with Email' seçeneği kontrol ediliyor...\n\n"
-                email_step_ready = False
-
-                for attempt in range(5):
-                    check_and_handle_ss_request(page)
-                    yield ": ping\n\n"
-
-                    # Doğrudan email inputu açıldıysa devam et
-                    if page.locator("input#email, input[type='email']").count() > 0 and page.locator("input#email, input[type='email']").first.is_visible():
-                        email_step_ready = True
-                        break
-
-                    email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email'), text='Continue with Email'").first
-                    if email_btn.count() > 0 and email_btn.is_visible():
-                        yield f"data: [*] 'Continue with Email' tıklanıyor...\n\n"
-                        email_btn.click(force=True)
-
-                    for _ in range(4):
-                        yield ": ping\n\n"
-                        check_and_handle_ss_request(page)
-                        if page.locator("input#email, input[type='email']").count() > 0 and page.locator("input#email, input[type='email']").first.is_visible():
-                            email_step_ready = True
-                            break
-                        page.wait_for_timeout(500)
-
-                    if email_step_ready:
-                        break
-
-                yield f"data: [+] E-posta giriş formu hazır!\n\n"
-                page.wait_for_timeout(1000)
-                check_and_handle_ss_request(page)
-
-                # 4. E-posta Girişi
+                # [4] E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
+                page.wait_for_selector("input#email, input[type='email']", timeout=15000)
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
-                check_and_handle_ss_request(page)
-                yield ": ping\n\n"
 
-                # 5. Turnstile Token ve Etkileşim Kontrolü
+                # [5] Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
-                for i in range(30):
+                for i in range(25):
                     yield ": ping\n\n"
-                    check_and_handle_ss_request(page)
                     token = page.evaluate("""() => {
                         const el = document.querySelector('input[name="cf-turnstile-response"]');
                         return el ? el.value : '';
@@ -569,16 +458,14 @@ def stream_signup():
 
                     page.wait_for_timeout(1000)
 
-                # 6. Form Gönderimi (Submit)
+                # [6] Form Gönderimi (Submit)
                 yield f"data: [6] Form gönderiliyor...\n\n"
-                check_and_handle_ss_request(page)
-                submit_btn = page.locator("button[type='submit']")
+                submit_btn = page.locator("button[type='submit']").last
                 if submit_btn.count() > 0:
                     submit_btn.click(force=True)
                     page.wait_for_timeout(4000)
-                yield ": ping\n\n"
 
-                # 7. SpamOk Mail Bekleme
+                # [7] SpamOk Mail Bekleme
                 yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
                 yield f"data: [*] '{local_prefix}@spamok.com' gelen kutusu dinleniyor...\n\n"
 
@@ -588,7 +475,6 @@ def stream_signup():
 
                 while time.time() < deadline:
                     yield ": ping\n\n"
-                    check_and_handle_ss_request(page)
                     try:
                         r = requests.get(f"{SPAMOK_API}/EmailBox/{local_prefix}", timeout=15)
                         if r.ok:
@@ -622,14 +508,12 @@ def stream_signup():
                 yield f"data: [+] Doğrulama linki alındı: {magic_link}\n\n"
                 yield f"data: \n\n"
 
-                # 8. Linke tarayıcı üzerinden git ve oturumu tamamla
+                # [8] Linke tarayıcı üzerinden git ve oturumu tamamla
                 yield f"data: [8] Doğrulama linki açılıyor...\n\n"
-                page.goto(magic_link, wait_until="domcontentloaded", timeout=45000)
+                page.goto(magic_link, wait_until="networkidle", timeout=45000)
                 page.wait_for_timeout(3000)
-                check_and_handle_ss_request(page)
-                yield ": ping\n\n"
 
-                # 9. Oturum Bilgisini Al
+                # [9] Oturum Bilgisini Al
                 session_data = page.evaluate("""async () => {
                     try {
                         const r = await fetch('/api/auth/get-session');
@@ -645,7 +529,7 @@ def stream_signup():
                 else:
                     yield f"data: [*] Sayfa yüklendi, oturum durumu: {session_data}\n\n"
 
-                # 10. Çerezleri kaydet
+                # [10] Çerezleri kaydet
                 cookies = context.cookies()
                 try:
                     with open(COOKIE_FILE, "w", encoding="utf-8") as f:
@@ -653,8 +537,6 @@ def stream_signup():
                     yield f"data: [+] Çerezler '{COOKIE_FILE}' dosyasına başarıyla kaydedildi.\n\n"
                 except Exception as fe:
                     yield f"data: [!] Çerez kaydedilirken hata: {fe}\n\n"
-
-                check_and_handle_ss_request(page)
 
                 yield f"data: \n\n"
                 yield f"data: ============================================================\n\n"
@@ -670,13 +552,6 @@ def stream_signup():
             raise
         except BaseException as err:
             yield f"data: [HATA] Bir hata oluştu: {type(err).__name__}: {str(err)}\n\n"
-            if page:
-                try:
-                    data = page.screenshot(timeout=3000, full_page=False)
-                    with open(SCREENSHOT_FILE, "wb") as f:
-                        f.write(data)
-                except Exception:
-                    pass
             yield f"data: [BITTI]\n\n"
             if context:
                 try:
