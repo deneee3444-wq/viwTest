@@ -261,7 +261,7 @@ async def capture_screenshot(page, job):
             type="jpeg",
             quality=70,
             full_page=False,
-            timeout=12000,
+            timeout=60000,
         )
 
         with job.lock:
@@ -433,7 +433,7 @@ async def signup_steps(page, context, job):
     login = page.locator(
         "a:has-text('Login'), button:has-text('Login')"
     ).first
-    await login.wait_for(state="visible", timeout=20000)
+    await login.wait_for(state="visible", timeout=60000)
     await login.click()
     await asyncio.sleep(2)
 
@@ -442,14 +442,14 @@ async def signup_steps(page, context, job):
         "button:has-text('Continue with Email'), "
         "span:has-text('Continue with Email')"
     ).first
-    await email_button.wait_for(state="visible", timeout=20000)
+    await email_button.wait_for(state="visible", timeout=60000)
     await email_button.click()
 
     log_event(job, "[4] E-posta yazılıyor...")
     email_input = page.locator(
         "input#email, input[type='email']"
     ).first
-    await email_input.wait_for(state="visible", timeout=20000)
+    await email_input.wait_for(state="visible", timeout=60000)
     await email_input.fill(email)
     await asyncio.sleep(2)
 
@@ -457,8 +457,8 @@ async def signup_steps(page, context, job):
 
     log_event(job, "[6] Form gönderiliyor...")
     submit = page.locator("button[type='submit']:visible").first
-    await submit.wait_for(state="visible", timeout=15000)
-    await submit.click(timeout=15000)
+    await submit.wait_for(state="visible", timeout=60000)
+    await submit.click(timeout=60000)
     await asyncio.sleep(3)
 
     log_event(job, "[7] Doğrulama bağlantısı bekleniyor...")
