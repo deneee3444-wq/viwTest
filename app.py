@@ -169,6 +169,7 @@ def stream_signup():
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
+                    "--window-size=1920,1080",
                     "--start-maximized",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -180,7 +181,7 @@ def stream_signup():
                         channel="chrome" if os.name == "nt" else None,
                         headless=False,
                         args=launch_args,
-                        viewport=None,
+                        viewport={"width": 1920, "height": 1080},
                     )
                     yield f"data: [*] Chrome kalıcı profiliyle başlatıldı (Headless: False).\n\n"
                 except Exception:
@@ -188,7 +189,7 @@ def stream_signup():
                         user_data_dir=PROFILE_DIR,
                         headless=False,
                         args=launch_args,
-                        viewport=None,
+                        viewport={"width": 1920, "height": 1080},
                     )
                     yield f"data: [*] Chromium kalıcı profiliyle başlatıldı (Headless: False).\n\n"
 
@@ -200,20 +201,23 @@ def stream_signup():
 
                 # 2. Giriş Modalı
                 yield f"data: [2] Giriş butonu aranıyor...\n\n"
+                page.wait_for_selector("a:has-text('Login'), button:has-text('Login')", timeout=15000)
                 login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
-                if login_btn.count() > 0 and login_btn.is_visible():
-                    login_btn.click()
-                    page.wait_for_timeout(1500)
+                if login_btn.count() > 0:
+                    login_btn.click(force=True)
+                    page.wait_for_timeout(2000)
 
                 # 3. Continue with Email
                 yield f"data: [3] 'Continue with Email' seçeneği tıklanıyor...\n\n"
+                page.wait_for_selector("button:has-text('Continue with Email'), span:has-text('Continue with Email')", timeout=15000)
                 email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
                 if email_btn.count() > 0:
-                    email_btn.click()
-                    page.wait_for_timeout(1500)
+                    email_btn.click(force=True)
+                    page.wait_for_timeout(2000)
 
                 # 4. E-posta Girişi
                 yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
+                page.wait_for_selector("input#email, input[type='email']", timeout=15000)
                 email_input = page.locator("input#email, input[type='email']").first
                 email_input.fill(test_email)
                 page.wait_for_timeout(1500)
