@@ -8,10 +8,7 @@ import string
 import subprocess
 import requests
 from flask import Flask, Response, stream_with_context
-from playwright.sync_api import (
-    sync_playwright,
-    TimeoutError as PlaywrightTimeoutError,
-)
+from playwright.sync_api import sync_playwright
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -21,20 +18,9 @@ app.json.ensure_ascii = False
 
 BASE = "https://viw.ai"
 SPAMOK_API = "https://api.spamok.com/v2"
-
-PROFILE_DIR = (
-    os.path.abspath("./chrome_profile")
-    if os.name == "nt"
-    else "/tmp/chrome_profile"
-)
-
+PROFILE_DIR = os.path.abspath("./chrome_profile") if os.name == "nt" else "/tmp/chrome_profile"
 COOKIE_FILE = os.path.abspath("./session_cookies.json")
-
-SCREENSHOT_FILE = (
-    os.path.abspath("./latest_screenshot.png")
-    if os.name == "nt"
-    else "/tmp/latest_screenshot.png"
-)
+SCREENSHOT_FILE = os.path.abspath("./latest_screenshot.png") if os.name == "nt" else "/tmp/latest_screenshot.png"
 
 PLACEHOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
   <rect width="100%" height="100%" fill="#020617"/>
@@ -48,78 +34,12 @@ PLACEHOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height=
 
 def generate_random_prefix(length: int = 12) -> str:
     """Rastgele e-posta kullanıcı adı üretir."""
-    return "".join(
-        random.SystemRandom().choice(string.ascii_lowercase + string.digits)
-        for _ in range(length)
-    )
-
-
-def wait_and_click_login(page, timeout_ms: int = 300000):
-    """
-    Login metnini etiket türünden bağımsız arar.
-    Gizli eşleşmeleri atlar, görünür eşleşmeleri tıklamayı dener.
-    Toplam bekleme süresi varsayılan olarak 5 dakikadır.
-
-    Generator olarak SSE bağlantısına bekleme sırasında ping gönderir.
-    """
-    deadline = time.monotonic() + timeout_ms / 1000
-    last_ping = time.monotonic()
-    last_error = None
-
-    # Login, LOGIN, login ve Log in gibi yazımları kabul eder.
-    # Tam metin eşleşmesiyle ilgisiz uzun metinleri seçmez.
-    login_elements = page.get_by_text(
-        re.compile(r"^\s*log\s*in\s*$", re.IGNORECASE)
-    )
-
-    while time.monotonic() < deadline:
-        if page.is_closed():
-            raise RuntimeError("Login beklenirken tarayıcı sayfası kapandı.")
-
-        if time.monotonic() - last_ping >= 10:
-            yield ": ping\n\n"
-            last_ping = time.monotonic()
-
-        for index in range(login_elements.count()):
-            remaining_ms = int(
-                (deadline - time.monotonic()) * 1000
-            )
-            if remaining_ms <= 0:
-                break
-
-            candidate = login_elements.nth(index)
-
-            # İlk eşleşmeye takılma; gizli mobil menü öğelerini atla.
-            if not candidate.is_visible():
-                continue
-
-            try:
-                # Görünür, etkin, sabit ve tıklanabilir olmasını da bekler.
-                # Kısa denemeler diğer görünür eşleşmelere geçmeyi sağlar.
-                candidate.click(timeout=min(2000, remaining_ms))
-                return
-            except PlaywrightTimeoutError as err:
-                last_error = err
-
-        remaining_ms = int(
-            (deadline - time.monotonic()) * 1000
-        )
-        if remaining_ms > 0:
-            page.wait_for_timeout(min(300, remaining_ms))
-
-    message = (
-        f"Login metni {timeout_ms / 1000:g} saniye içinde "
-        "bulunamadı veya tıklanabilir hale gelmedi."
-    )
-
-    if last_error is not None:
-        raise TimeoutError(message) from last_error
-
-    raise TimeoutError(message)
+    return "".join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
 
 def capture_screen_from_system():
-    """Playwright'a dokunmadan işletim sistemi üzerinden ekran görüntüsü alır."""
+    """Playwright'a dokunmadan doğrudan işletim sistemi/X11 üzerinden anlık ekran görüntüsü alır."""
+    # Linux / Render ortamında Xvfb (:99) üzerinden scrot ile anında yakala
     if os.name != "nt":
         try:
             disp = os.environ.get("DISPLAY", ":99")
@@ -129,18 +49,14 @@ def capture_screen_from_system():
                 capture_output=True,
                 timeout=4,
             )
-            if (
-                res.returncode == 0
-                and os.path.exists(SCREENSHOT_FILE)
-                and os.path.getsize(SCREENSHOT_FILE) > 0
-            ):
+            if res.returncode == 0 and os.path.exists(SCREENSHOT_FILE) and os.path.getsize(SCREENSHOT_FILE) > 0:
                 return True
         except Exception:
             pass
 
+    # Windows ortamında Pillow fallback
     try:
         from PIL import ImageGrab
-
         im = ImageGrab.grab()
         im.save(SCREENSHOT_FILE)
         return True
@@ -159,25 +75,15 @@ def favicon():
 def take_screenshot_endpoint():
     """Kullanıcı butona bastığında X11/ekran üzerinden anlık SS alır."""
     capture_screen_from_system()
-
-    for path in [
-        SCREENSHOT_FILE,
-        "/tmp/latest_screenshot.png",
-        "./latest_screenshot.png",
-    ]:
+    for path in [SCREENSHOT_FILE, "/tmp/latest_screenshot.png", "./latest_screenshot.png"]:
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
                 with open(path, "rb") as f:
                     data = f.read()
-
                 return Response(
                     data,
                     mimetype="image/png",
-                    headers={
-                        "Cache-Control": (
-                            "no-store, no-cache, must-revalidate, max-age=0"
-                        )
-                    },
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
                 )
             except Exception:
                 pass
@@ -185,32 +91,21 @@ def take_screenshot_endpoint():
     return Response(
         PLACEHOLDER_SVG,
         mimetype="image/svg+xml",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
-        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 
 @app.get("/screenshot")
 def get_screenshot():
-    for path in [
-        SCREENSHOT_FILE,
-        "/tmp/latest_screenshot.png",
-        "./latest_screenshot.png",
-    ]:
+    for path in [SCREENSHOT_FILE, "/tmp/latest_screenshot.png", "./latest_screenshot.png"]:
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
                 with open(path, "rb") as f:
                     data = f.read()
-
                 return Response(
                     data,
                     mimetype="image/png",
-                    headers={
-                        "Cache-Control": (
-                            "no-store, no-cache, must-revalidate, max-age=0"
-                        )
-                    },
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
                 )
             except Exception:
                 pass
@@ -218,9 +113,7 @@ def get_screenshot():
     return Response(
         PLACEHOLDER_SVG,
         mimetype="image/svg+xml",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
-        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 
@@ -258,12 +151,7 @@ def home():
                 align-items: center;
                 gap: 10px;
             }
-            p {
-                color: #94a3b8;
-                font-size: 14px;
-                margin-bottom: 20px;
-                line-height: 1.5;
-            }
+            p { color: #94a3b8; font-size: 14px; margin-bottom: 20px; line-height: 1.5; }
             .button-row {
                 display: flex;
                 gap: 12px;
@@ -283,15 +171,8 @@ def home():
                 background: linear-gradient(135deg, #2563eb, #0284c7);
                 color: white;
             }
-            #btnStart:hover {
-                opacity: 0.95;
-                transform: translateY(-1px);
-            }
-            #btnStart:disabled {
-                opacity: 0.5;
-                cursor: not-allowed;
-                transform: none;
-            }
+            #btnStart:hover { opacity: 0.95; transform: translateY(-1px); }
+            #btnStart:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
             #btnSS {
                 background: linear-gradient(135deg, #059669, #10b981);
                 color: #ffffff;
@@ -476,19 +357,18 @@ def home():
 @app.get("/stream-signup")
 def stream_signup():
     def generate():
-        yield "data: ============================================================\n\n"
-        yield "data:  Viw AI - Tam Otomatik Kayıt & Oturum Alma\n\n"
+        yield f"data: ============================================================\n\n"
+        yield f"data:  Viw AI - Tam Otomatik Kayıt & Oturum Alma\n\n"
         yield f"data:  Profil Dizini: {PROFILE_DIR}\n\n"
-        yield "data: ============================================================\n\n"
+        yield f"data: ============================================================\n\n"
 
-        # 1. Test e-postası oluştur
+        # 1. Test E-postası oluştur
         local_prefix = generate_random_prefix(12)
         test_email = f"{local_prefix}@spamok.com"
         yield f"data: [*] Üretilen e-posta: {test_email}\n\n"
 
         context = None
         page = None
-
         try:
             with sync_playwright() as p:
                 launch_args = [
@@ -510,10 +390,7 @@ def stream_signup():
                         args=launch_args,
                         viewport={"width": 1920, "height": 1080},
                     )
-                    yield (
-                        "data: [*] Chrome kalıcı profiliyle başlatıldı "
-                        "(Headless: False).\n\n"
-                    )
+                    yield f"data: [*] Chrome kalıcı profiliyle başlatıldı (Headless: False).\n\n"
                 except Exception:
                     context = p.chromium.launch_persistent_context(
                         user_data_dir=PROFILE_DIR,
@@ -521,144 +398,124 @@ def stream_signup():
                         args=launch_args,
                         viewport={"width": 1920, "height": 1080},
                     )
-                    yield (
-                        "data: [*] Chromium kalıcı profiliyle başlatıldı "
-                        "(Headless: False).\n\n"
-                    )
+                    yield f"data: [*] Chromium kalıcı profiliyle başlatıldı (Headless: False).\n\n"
 
-                page = (
-                    context.pages[0]
-                    if context.pages
-                    else context.new_page()
-                )
+                page = context.pages[0] if context.pages else context.new_page()
 
-                # [1] Sayfayı aç.
-                # networkidle, arayüzün tamamen hazır olduğunu garanti etmez.
-                yield "data: [1] https://viw.ai/ açılıyor...\n\n"
+                # [1] https://viw.ai/ açılıyor (domcontentloaded hızlı, sonra polling ile tam yüklenmeyi bekle)
+                yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
+                page.goto("https://viw.ai/", wait_until="commit", timeout=300000)
 
-                try:
-                    page.goto(
-                        "https://viw.ai/",
-                        wait_until="networkidle",
-                        timeout=300000,
-                    )
-                except Exception:
-                    page.goto(
-                        "https://viw.ai/",
-                        wait_until="domcontentloaded",
-                        timeout=300000,
-                    )
-                    page.wait_for_timeout(3000)
-
-                yield f"data: [*] Sayfa yüklendi: '{page.title()}'\n\n"
-
-                # [2] Login'i metninden bul ve tıkla.
-                # Etiket sınırlaması yok; gizli eşleşmeler atlanır.
-                # Bu adıma gelindikten sonra en fazla 5 dakika beklenir.
-                yield (
-                    "data: [2] Login metni aranıyor "
-                    "(en fazla 5 dakika beklenecek)...\n\n"
-                )
-
-                yield from wait_and_click_login(
-                    page,
-                    timeout_ms=300000,
-                )
-
-                yield "data: [+] Login metni bulundu ve tıklandı.\n\n"
-                page.wait_for_timeout(2000)
-
-                # [3] Continue with Email seçeneği
-                yield (
-                    "data: [3] 'Continue with Email' "
-                    "seçeneği tıklanıyor...\n\n"
-                )
-
-                page.wait_for_selector(
-                    "button:has-text('Continue with Email'), "
-                    "span:has-text('Continue with Email')",
-                    timeout=300000,
-                )
-
-                email_btn = page.locator(
-                    "button:has-text('Continue with Email'), "
-                    "span:has-text('Continue with Email')"
-                ).first
-
-                if email_btn.count() > 0:
-                    email_btn.click()
+                # Sayfa yüklenirken ping gönder (Render proxy idle timeout koruması)
+                for tick in range(150):  # max 5 dk (150 x 2s)
+                    yield ": ping\n\n"
+                    ready = page.evaluate("""() => document.readyState""")
+                    if ready == "complete":
+                        break
                     page.wait_for_timeout(2000)
 
-                # [4] E-posta girişi
-                yield f"data: [4] E-posta yazılıyor: {test_email}\n\n"
+                page.wait_for_timeout(2000)
+                yield f"data: [*] Sayfa yüklendi: '{page.title()}'\n\n"
 
-                page.wait_for_selector(
-                    "input#email, input[type='email']",
-                    timeout=300000,
-                )
-
-                email_input = page.locator(
-                    "input#email, input[type='email']"
-                ).first
-
-                email_input.fill(test_email)
-                page.wait_for_timeout(1500)
-
-                # [5] Turnstile token ve etkileşim kontrolü
-                yield "data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
-
-                for i in range(35):
+                # [2] Giriş butonu aranıyor (polling ile - max 5 dk)
+                yield f"data: [2] Giriş butonu aranıyor...\n\n"
+                login_found = False
+                for tick in range(150):  # max 5 dk
                     yield ": ping\n\n"
+                    login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
+                    if login_btn.count() > 0 and login_btn.is_visible():
+                        login_found = True
+                        break
+                    page.wait_for_timeout(2000)
 
+                if login_found:
+                    yield f"data: [+] Login butonu bulundu, tıklanıyor...\n\n"
+                    login_btn.click()
+                    page.wait_for_timeout(2000)
+                else:
+                    yield f"data: [!] Login butonu bulunamadı, JS ile deneniyor...\n\n"
+                    page.evaluate("""() => {
+                        const el = document.querySelector('a[href*="/login"]');
+                        if (el) el.click();
+                    }""")
+                    page.wait_for_timeout(2000)
+                yield ": ping\n\n"
+
+                # [3] 'Continue with Email' seçeneği tıklanıyor (polling ile - max 5 dk)
+                yield f"data: [3] 'Continue with Email' seçeneği aranıyor...\n\n"
+                email_btn_found = False
+                for tick in range(150):  # max 5 dk
+                    yield ": ping\n\n"
+                    email_btn = page.locator("button:has-text('Continue with Email'), span:has-text('Continue with Email')").first
+                    if email_btn.count() > 0 and email_btn.is_visible():
+                        email_btn_found = True
+                        break
+                    # Belki email input doğrudan açıktır
+                    if page.locator("input#email, input[type='email']").count() > 0:
+                        email_btn_found = True
+                        break
+                    page.wait_for_timeout(2000)
+
+                if email_btn_found and email_btn.count() > 0 and email_btn.is_visible():
+                    yield f"data: [+] 'Continue with Email' bulundu, tıklanıyor...\n\n"
+                    email_btn.click()
+                    page.wait_for_timeout(2000)
+                yield ": ping\n\n"
+
+                # [4] E-posta Girişi (polling ile - max 5 dk)
+                yield f"data: [4] E-posta alanı aranıyor...\n\n"
+                email_input_found = False
+                for tick in range(150):  # max 5 dk
+                    yield ": ping\n\n"
+                    email_input = page.locator("input#email, input[type='email']").first
+                    if email_input.count() > 0 and email_input.is_visible():
+                        email_input_found = True
+                        break
+                    page.wait_for_timeout(2000)
+
+                if email_input_found:
+                    yield f"data: [+] E-posta yazılıyor: {test_email}\n\n"
+                    email_input.fill(test_email)
+                    page.wait_for_timeout(1500)
+                else:
+                    raise Exception("E-posta alanı bulunamadı (5 dk timeout)")
+                yield ": ping\n\n"
+
+                # [5] Turnstile Token ve Etkileşim Kontrolü
+                yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
+                for i in range(60):  # max ~2 dk
+                    yield ": ping\n\n"
                     token = page.evaluate("""() => {
-                        const el = document.querySelector(
-                            'input[name="cf-turnstile-response"]'
-                        );
+                        const el = document.querySelector('input[name="cf-turnstile-response"]');
                         return el ? el.value : '';
                     }""")
-
                     if token:
-                        yield (
-                            "data:     [+] Turnstile token hazır! "
-                            f"(Uzunluk: {len(token)})\n\n"
-                        )
+                        yield f"data:     [+] Turnstile token hazır! (Uzunluk: {len(token)})\n\n"
                         break
 
+                    # Turnstile frame kontrolü ve tıklama
                     try:
-                        ts_frame = page.frame_locator(
-                            "iframe[src*='challenges.cloudflare.com'], "
-                            "iframe[src*='turnstile']"
-                        ).first
-
-                        cb = ts_frame.locator(
-                            "input[type='checkbox'], label, "
-                            ".ctp-checkbox-label, #challenge-stage"
-                        ).first
-
+                        ts_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
+                        cb = ts_frame.locator("input[type='checkbox'], label, .ctp-checkbox-label, #challenge-stage").first
                         if cb.count() > 0 and cb.is_visible():
                             cb.click(force=True, timeout=2000)
                     except Exception:
                         pass
 
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(2000)
 
-                # [6] Form gönderimi
-                yield "data: [6] Form gönderiliyor...\n\n"
-
-                submit_btn = page.locator(
-                    "button[type='submit']"
-                ).last
-
+                # [6] Form Gönderimi (Submit)
+                yield f"data: [6] Form gönderiliyor...\n\n"
+                yield ": ping\n\n"
+                submit_btn = page.locator("button[type='submit']").last
                 if submit_btn.count() > 0:
                     submit_btn.click(force=True)
                     page.wait_for_timeout(4000)
+                yield ": ping\n\n"
 
-                # [7] SpamOk mail bekleme - en fazla 5 dakika
-                yield "data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
-                yield (
-                    f"data: [*] '{local_prefix}@spamok.com' "
-                    "gelen kutusu dinleniyor...\n\n"
-                )
+                # [7] SpamOk Mail Bekleme (max 5 dk)
+                yield f"data: [7] Doğrulama bağlantısı bekleniyor...\n\n"
+                yield f"data: [*] '{local_prefix}@spamok.com' gelen kutusu dinleniyor...\n\n"
 
                 deadline = time.time() + 300
                 seen_ids = set()
@@ -666,80 +523,51 @@ def stream_signup():
 
                 while time.time() < deadline:
                     yield ": ping\n\n"
-
                     try:
-                        r = requests.get(
-                            f"{SPAMOK_API}/EmailBox/{local_prefix}",
-                            timeout=15,
-                        )
-
+                        r = requests.get(f"{SPAMOK_API}/EmailBox/{local_prefix}", timeout=15)
                         if r.ok:
                             mails = r.json().get("mails", [])
-
                             for m in mails:
                                 if "Viw AI" not in m.get("subject", ""):
                                     continue
-
                                 mid = m["id"]
-
                                 if mid in seen_ids:
                                     continue
-
                                 seen_ids.add(mid)
-
-                                d = requests.get(
-                                    f"{SPAMOK_API}/Email/{local_prefix}/{mid}",
-                                    timeout=15,
-                                ).json()
-
-                                text = (
-                                    d.get("messagePlain", "")
-                                    + "\n"
-                                    + d.get("messageHtml", "")
-                                )
-
+                                d = requests.get(f"{SPAMOK_API}/Email/{local_prefix}/{mid}", timeout=15).json()
+                                text = d.get("messagePlain", "") + "\n" + d.get("messageHtml", "")
                                 match = re.search(
                                     r"https://viw\.ai/api/auth/magic-link/verify\?token=[^\s\"'<>&]+(?:&amp;|&)callbackURL=[^\s\"'<>]+",
                                     text,
                                 )
-
                                 if match:
-                                    magic_link = match.group(0).replace(
-                                        "&amp;", "&"
-                                    )
+                                    magic_link = match.group(0).replace("&amp;", "&")
                                     break
-
                         if magic_link:
                             break
-
                     except Exception as err:
-                        yield (
-                            "data: [!] Mail kontrolü sırasında hata: "
-                            f"{err}\n\n"
-                        )
-
+                        yield f"data: [!] Mail kontrolü sırasında hata: {err}\n\n"
                     time.sleep(3)
 
                 if not magic_link:
-                    raise TimeoutError(
-                        "Magic link e-postası zaman aşımına uğradı (gelmedi)."
-                    )
+                    raise TimeoutError("Magic link e-postası zaman aşımına uğradı (gelmedi).")
 
-                yield "data: \n\n"
+                yield f"data: \n\n"
                 yield f"data: [+] Doğrulama linki alındı: {magic_link}\n\n"
-                yield "data: \n\n"
+                yield f"data: \n\n"
 
-                # [8] Doğrulama linkini aç
-                yield "data: [8] Doğrulama linki açılıyor...\n\n"
-
-                page.goto(
-                    magic_link,
-                    wait_until="networkidle",
-                    timeout=300000,
-                )
+                # [8] Linke tarayıcı üzerinden git ve oturumu tamamla (polling ile - max 5 dk)
+                yield f"data: [8] Doğrulama linki açılıyor...\n\n"
+                page.goto(magic_link, wait_until="commit", timeout=300000)
+                for tick in range(150):  # max 5 dk
+                    yield ": ping\n\n"
+                    ready = page.evaluate("""() => document.readyState""")
+                    if ready == "complete":
+                        break
+                    page.wait_for_timeout(2000)
                 page.wait_for_timeout(3000)
 
-                # [9] Oturum bilgisini al
+                # [9] Oturum Bilgisini Al
                 session_data = page.evaluate("""async () => {
                     try {
                         const r = await fetch('/api/auth/get-session');
@@ -749,71 +577,43 @@ def stream_signup():
                 }""")
 
                 if session_data and session_data.get("user"):
-                    yield "data: [🎉] BAŞARILI! Oturum açıldı.\n\n"
-                    yield (
-                        "data:      Kullanıcı ID: "
-                        f"{session_data['user'].get('id')}\n\n"
-                    )
-                    yield (
-                        "data:      E-posta: "
-                        f"{session_data['user'].get('email')}\n\n"
-                    )
+                    yield f"data: [🎉] BAŞARILI! Oturum açıldı.\n\n"
+                    yield f"data:      Kullanıcı ID: {session_data['user'].get('id')}\n\n"
+                    yield f"data:      E-posta: {session_data['user'].get('email')}\n\n"
                 else:
-                    yield (
-                        "data: [*] Sayfa yüklendi, oturum durumu: "
-                        f"{session_data}\n\n"
-                    )
+                    yield f"data: [*] Sayfa yüklendi, oturum durumu: {session_data}\n\n"
 
                 # [10] Çerezleri kaydet
                 cookies = context.cookies()
-
                 try:
                     with open(COOKIE_FILE, "w", encoding="utf-8") as f:
-                        json.dump(
-                            cookies,
-                            f,
-                            indent=2,
-                            ensure_ascii=False,
-                        )
-
-                    yield (
-                        f"data: [+] Çerezler '{COOKIE_FILE}' "
-                        "dosyasına başarıyla kaydedildi.\n\n"
-                    )
-
+                        json.dump(cookies, f, indent=2, ensure_ascii=False)
+                    yield f"data: [+] Çerezler '{COOKIE_FILE}' dosyasına başarıyla kaydedildi.\n\n"
                 except Exception as fe:
                     yield f"data: [!] Çerez kaydedilirken hata: {fe}\n\n"
 
-                yield "data: \n\n"
-                yield "data: ============================================================\n\n"
-                yield "data: [🎉] HESAP BAŞARIYLA OLUŞTURULDU!\n\n"
+                yield f"data: \n\n"
+                yield f"data: ============================================================\n\n"
+                yield f"data: [🎉] HESAP BAŞARIYLA OLUŞTURULDU!\n\n"
                 yield f"data: E-POSTA       : {test_email}\n\n"
                 yield f"data: TOPLAM ÇEREZ  : {len(cookies)}\n\n"
-                yield "data: ============================================================\n\n"
-                yield "data: [BITTI]\n\n"
+                yield f"data: ============================================================\n\n"
+                yield f"data: [BITTI]\n\n"
 
                 context.close()
 
         except (KeyboardInterrupt, SystemExit):
             raise
-
         except BaseException as err:
-            yield (
-                "data: [HATA] Bir hata oluştu: "
-                f"{type(err).__name__}: {str(err)}\n\n"
-            )
-            yield "data: [BITTI]\n\n"
-
+            yield f"data: [HATA] Bir hata oluştu: {type(err).__name__}: {str(err)}\n\n"
+            yield f"data: [BITTI]\n\n"
             if context:
                 try:
                     context.close()
                 except Exception:
                     pass
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-    )
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
 if __name__ == "__main__":
