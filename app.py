@@ -402,19 +402,20 @@ def stream_signup():
 
                 page = context.pages[0] if context.pages else context.new_page()
 
-                # [1] https://viw.ai/ açılıyor (domcontentloaded hızlı, sonra polling ile tam yüklenmeyi bekle)
+                # [1] https://viw.ai/ açılıyor
                 yield f"data: [1] https://viw.ai/ açılıyor...\n\n"
                 page.goto("https://viw.ai/", wait_until="commit", timeout=300000)
-
-                # Sayfa yüklenirken ping gönder (Render proxy idle timeout koruması)
-                for tick in range(150):  # max 5 dk (150 x 2s)
+                # DOM hazır olana kadar ping göndereli bekle (interactive yeterli, complete şart değil)
+                for tick in range(150):
                     yield ": ping\n\n"
-                    ready = page.evaluate("""() => document.readyState""")
-                    if ready == "complete":
-                        break
+                    try:
+                        ready = page.evaluate("() => document.readyState")
+                        if ready in ("interactive", "complete"):
+                            break
+                    except Exception:
+                        pass
                     page.wait_for_timeout(2000)
-
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(3000)
                 yield f"data: [*] Sayfa yüklendi: '{page.title()}'\n\n"
 
                 # [2] Giriş butonu aranıyor (polling ile - max 5 dk)
@@ -483,7 +484,8 @@ def stream_signup():
 
                 # [5] Turnstile Token ve Etkileşim Kontrolü
                 yield f"data: [5] Turnstile doğrulaması kontrol ediliyor...\n\n"
-                for i in range(60):  # max ~2 dk
+                last_clicked_tick = -99
+                for i in range(150):  # max ~5 dk
                     yield ": ping\n\n"
                     token = page.evaluate("""() => {
                         const el = document.querySelector('input[name="cf-turnstile-response"]');
@@ -493,14 +495,27 @@ def stream_signup():
                         yield f"data:     [+] Turnstile token hazır! (Uzunluk: {len(token)})\n\n"
                         break
 
-                    # Turnstile frame kontrolü ve tıklama
-                    try:
-                        ts_frame = page.frame_locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
-                        cb = ts_frame.locator("input[type='checkbox'], label, .ctp-checkbox-label, #challenge-stage").first
-                        if cb.count() > 0 and cb.is_visible():
-                            cb.click(force=True, timeout=2000)
-                    except Exception:
-                        pass
+                    # Turnstile iframe'ini bul, checkbox sol tarafta (x=30, y=32)
+                    # Dil farkı (TR / EN) fark etmez: iframe URL'si ve input name sabittir.
+                    # Sürekli tıklayıp doğrulama döngüsünü bozmamak için en az 10 sn arayla tıkla
+                    if (i - last_clicked_tick) >= 5:
+                        try:
+                            ts_iframe = page.locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']").first
+                            if ts_iframe.count() > 0 and ts_iframe.is_visible():
+                                box = ts_iframe.bounding_box()
+                                if box and box["width"] > 0:
+                                    click_x = box["x"] + 30
+                                    click_y = box["y"] + (box["height"] / 2)
+                                    # İnsan gibi fareyi hareket ettir ve tıkla
+                                    page.mouse.move(click_x, click_y, steps=5)
+                                    page.wait_for_timeout(100)
+                                    page.mouse.down()
+                                    page.wait_for_timeout(120)
+                                    page.mouse.up()
+                                    last_clicked_tick = i
+                                    yield f"data:     [*] Turnstile checkbox tıklandı (x={click_x:.0f}, y={click_y:.0f})\n\n"
+                        except Exception:
+                            pass
 
                     page.wait_for_timeout(2000)
 
@@ -562,7 +577,7 @@ def stream_signup():
                 for tick in range(150):  # max 5 dk
                     yield ": ping\n\n"
                     ready = page.evaluate("""() => document.readyState""")
-                    if ready == "complete":
+                    if ready in ("interactive", "complete"):
                         break
                     page.wait_for_timeout(2000)
                 page.wait_for_timeout(3000)
